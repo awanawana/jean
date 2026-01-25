@@ -5,7 +5,7 @@
  * Shows on first launch when either CLI is not installed.
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { CheckCircle2 } from 'lucide-react'
 import {
   Dialog,
@@ -18,14 +18,7 @@ import { Button } from '@/components/ui/button'
 import { useUIStore } from '@/store/ui-store'
 import { useClaudeCliSetup } from '@/services/claude-cli'
 import { useGhCliSetup } from '@/services/gh-cli'
-import { usePreferences, useSavePreferences } from '@/services/preferences'
-import { isWindows } from '@/services/wsl'
-import {
-  SetupState,
-  InstallingState,
-  ErrorState,
-  WslRequiredState,
-} from './CliSetupComponents'
+import { ErrorState, InstallingState, SetupState } from './CliSetupComponents'
 import type { ReleaseInfo } from '@/types/claude-cli'
 import type { GhReleaseInfo } from '@/types/gh-cli'
 

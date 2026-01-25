@@ -11,7 +11,7 @@
  * - CliReinstallModalUI: Shared UI component, receives setup as prop
  */
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CheckCircle2 } from 'lucide-react'
 import {
   Dialog,
@@ -23,21 +23,20 @@ import {
 import { Button } from '@/components/ui/button'
 import { useClaudeCliSetup } from '@/services/claude-cli'
 import { useGhCliSetup } from '@/services/gh-cli'
-import { usePreferences, useSavePreferences } from '@/services/preferences'
-import { isWindows } from '@/services/wsl'
 import { logger } from '@/lib/logger'
 import {
-  SetupState,
-  InstallingState,
   ErrorState,
-  WslRequiredState,
+  InstallingState,
+  SetupState,
 } from '@/components/onboarding/CliSetupComponents'
 
 /**
  * Common interface for CLI setup objects (both hooks return compatible shapes)
  */
 interface CliSetupInterface {
-  status: { installed?: boolean; version?: string | null; path?: string | null } | undefined
+  status:
+    | { installed?: boolean; version?: string | null; path?: string | null }
+    | undefined
   versions: { version: string; prerelease: boolean }[]
   isVersionsLoading: boolean
   progress: { stage: string; message: string; percent: number } | null
@@ -53,7 +52,6 @@ interface ModalProps {
   onOpenChange: (open: boolean) => void
 }
 
-
 type ModalStep = 'setup' | 'installing' | 'complete'
 
 /**
@@ -62,7 +60,9 @@ type ModalStep = 'setup' | 'installing' | 'complete'
  */
 export function ClaudeCliReinstallModal({ open, onOpenChange }: ModalProps) {
   if (!open) return null
-  return <ClaudeCliReinstallModalContent open={open} onOpenChange={onOpenChange} />
+  return (
+    <ClaudeCliReinstallModalContent open={open} onOpenChange={onOpenChange} />
+  )
 }
 
 function ClaudeCliReinstallModalContent({ open, onOpenChange }: ModalProps) {
@@ -97,7 +97,6 @@ function GhCliReinstallModalContent({ open, onOpenChange }: ModalProps) {
     />
   )
 }
-
 
 /**
  * Shared UI component - receives setup as prop, no hooks here
@@ -172,12 +171,17 @@ function CliReinstallModalUI({
     }
     // Guard against double-invocation
     if (isInstallingRef.current) {
-      logger.warn('[CliReinstallModal] Already installing, aborting duplicate call')
+      logger.warn(
+        '[CliReinstallModal] Already installing, aborting duplicate call'
+      )
       return
     }
     isInstallingRef.current = true
 
-    logger.info('[CliReinstallModal] Starting installation', { cliType, selectedVersion })
+    logger.info('[CliReinstallModal] Starting installation', {
+      cliType,
+      selectedVersion,
+    })
     setStep('installing')
     setInstallError(null)
 
@@ -189,7 +193,10 @@ function CliReinstallModalUI({
         setStep('complete')
       },
       onError: error => {
-        logger.error('[CliReinstallModal] Installation failed', { cliType, error })
+        logger.error('[CliReinstallModal] Installation failed', {
+          cliType,
+          error,
+        })
         isInstallingRef.current = false
         setInstallError(error)
         setStep('setup')
