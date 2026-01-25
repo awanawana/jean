@@ -38,6 +38,40 @@ fn now() -> u64 {
         .as_secs()
 }
 
+/// Get the use_wsl preference from app settings
+/// On non-Windows platforms, always returns true (ignored anyway)
+/// On Windows, returns the user's preference (defaults to true)
+pub async fn get_use_wsl_preference(app: &tauri::AppHandle) -> bool {
+    #[cfg(not(windows))]
+    {
+        let _ = app; // suppress unused warning
+        true
+    }
+
+    #[cfg(windows)]
+    {
+        crate::load_preferences(app.clone())
+            .await
+            .map(|p| p.use_wsl)
+            .unwrap_or(true)
+    }
+}
+
+/// Synchronous version of get_use_wsl_preference for background threads
+/// On non-Windows platforms, always returns true
+/// On Windows, returns true (default) since we can't easily async in threads
+fn get_use_wsl_preference_sync() -> bool {
+    #[cfg(not(windows))]
+    {
+        true
+    }
+
+    #[cfg(windows)]
+    {
+        true // Default to WSL in background threads
+    }
+}
+
 /// List all projects
 #[tauri::command]
 pub async fn list_projects(app: AppHandle) -> Result<Vec<Project>, String> {
@@ -55,6 +89,8 @@ pub async fn add_project(
 ) -> Result<Project, String> {
     log::trace!("Adding project from path: {path}, parent_id: {parent_id:?}");
 
+    let use_wsl = get_use_wsl_preference(&app).await;
+
     // Validate it's a git repository
     if !git::validate_git_repo(&path)? {
         // Show WSL-converted path in error message for better UX
@@ -68,7 +104,7 @@ pub async fn add_project(
 
     // Get repository name and current branch
     let name = git::get_repo_name(&path)?;
-    let default_branch = git::get_current_branch(&path)?;
+    let default_branch = git::get_current_branch(&path, use_wsl)?;
 
     // Check if project already exists
     let mut data = load_projects_data(&app)?;
@@ -108,8 +144,10 @@ pub async fn add_project(
 ///
 /// Returns the path on success, allowing caller to then add_project
 #[tauri::command]
-pub async fn init_git_in_folder(path: String) -> Result<String, String> {
+pub async fn init_git_in_folder(app: AppHandle, path: String) -> Result<String, String> {
     log::trace!("Initializing git in existing folder: {path}");
+
+    let use_wsl = get_use_wsl_preference(&app).await;
 
     // Validate path exists (works with WSL UNC paths)
     if !path_exists(&path)? {
@@ -125,7 +163,7 @@ pub async fn init_git_in_folder(path: String) -> Result<String, String> {
 
     if already_git_repo {
         // Check if it has any commits (HEAD exists)
-        let has_commits = create_git_command(&["rev-parse", "HEAD"], path_obj)
+        let has_commits = create_git_command(&["rev-parse", "HEAD"], path_obj, use_wsl)
             .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()))
             .map(|o| o.status.success())
             .unwrap_or(false);
@@ -139,7 +177,7 @@ pub async fn init_git_in_folder(path: String) -> Result<String, String> {
 
     // Run git init (skip if already a git repo)
     if !already_git_repo {
-        let output = create_git_command(&["init"], path_obj)?
+        let output = create_git_command(&["init"], path_obj, use_wsl)?
             .output()
             .map_err(|e| format!("Failed to run git init: {e}"))?;
 
@@ -150,7 +188,7 @@ pub async fn init_git_in_folder(path: String) -> Result<String, String> {
     }
 
     // Stage all files
-    let add_output = create_git_command(&["add", "."], path_obj)?
+    let add_output = create_git_command(&["add", "."], path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to run git add: {e}"))?;
 
@@ -160,7 +198,7 @@ pub async fn init_git_in_folder(path: String) -> Result<String, String> {
     }
 
     // Create initial commit
-    let commit_output = create_git_command(&["commit", "-m", "Initial commit"], path_obj)?
+    let commit_output = create_git_command(&["commit", "-m", "Initial commit"], path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to run git commit: {e}"))?;
 
@@ -172,10 +210,13 @@ pub async fn init_git_in_folder(path: String) -> Result<String, String> {
         if stderr.contains("nothing to commit") || stdout.contains("nothing to commit") {
             log::warn!("No files to commit, creating empty initial commit");
             // Create an empty commit with --allow-empty
-            let empty_commit =
-                create_git_command(&["commit", "--allow-empty", "-m", "Initial commit"], path_obj)?
-                    .output()
-                    .map_err(|e| format!("Failed to create empty commit: {e}"))?;
+            let empty_commit = create_git_command(
+                &["commit", "--allow-empty", "-m", "Initial commit"],
+                path_obj,
+                use_wsl,
+            )?
+            .output()
+            .map_err(|e| format!("Failed to create empty commit: {e}"))?;
 
             if !empty_commit.status.success() {
                 let empty_stderr = String::from_utf8_lossy(&empty_commit.stderr);
@@ -199,15 +240,18 @@ pub async fn init_project(
 ) -> Result<Project, String> {
     log::trace!("Initializing new project at path: {path}, parent_id: {parent_id:?}");
 
+    let use_wsl = get_use_wsl_preference(&app).await;
+
     // Initialize git repository (creates dir if needed)
-    git::init_repo(&path)?;
+    git::init_repo(&path, use_wsl)?;
 
     // Get repository name (directory name)
     let name = git::get_repo_name(&path)?;
 
     // For new repos, the default branch is typically "main" or "master"
     // Get it from git to be sure
-    let default_branch = git::get_current_branch(&path).unwrap_or_else(|_| "main".to_string());
+    let default_branch =
+        git::get_current_branch(&path, use_wsl).unwrap_or_else(|_| "main".to_string());
 
     // Check if project already exists
     let mut data = load_projects_data(&app)?;
@@ -353,6 +397,8 @@ pub async fn create_worktree(
 ) -> Result<Worktree, String> {
     log::trace!("Creating worktree for project: {project_id}");
 
+    let use_wsl = get_use_wsl_preference(&app).await;
+
     let data = load_projects_data(&app)?;
 
     let project = data
@@ -362,7 +408,7 @@ pub async fn create_worktree(
 
     // Use provided base branch or project's default branch, with validation
     let preferred_base = base_branch.unwrap_or_else(|| project.default_branch.clone());
-    let base = git::get_valid_base_branch(&project.path, &preferred_base)?;
+    let base = git::get_valid_base_branch(&project.path, &preferred_base, use_wsl)?;
 
     // Generate workspace name - use custom name, PR-based name, issue-based name, or random name
     let name = if let Some(custom) = custom_name {
@@ -464,10 +510,12 @@ pub async fn create_worktree(
     let base_clone = base.clone();
     let issue_context_clone = issue_context.clone();
     let pr_context_clone = pr_context.clone();
+    let use_wsl_clone = use_wsl;
 
     // Spawn background thread for git operations
     thread::spawn(move || {
         log::trace!("Background: Creating git worktree {name_clone} at {worktree_path_clone}");
+        let use_wsl = use_wsl_clone;
 
         // Check if path already exists
         let worktree_path = std::path::Path::new(&worktree_path_clone);
@@ -493,7 +541,7 @@ pub async fn create_worktree(
                         .as_ref()
                         .map(|d| d.worktree_name_exists(&project_id_clone, &candidate))
                         .unwrap_or(false);
-                    let branch_in_git = git::branch_exists(&project_path, &candidate);
+                    let branch_in_git = git::branch_exists(&project_path, &candidate, use_wsl);
 
                     if !name_in_storage && !branch_in_git {
                         break candidate;
@@ -529,7 +577,7 @@ pub async fn create_worktree(
         }
 
         // Check if branch already exists
-        if git::branch_exists(&project_path, &name_clone) {
+        if git::branch_exists(&project_path, &name_clone, use_wsl) {
             log::trace!("Background: Branch already exists: {name_clone}");
 
             // Generate a suggested alternative name with incremented suffix
@@ -542,7 +590,7 @@ pub async fn create_worktree(
                         .as_ref()
                         .map(|d| d.worktree_name_exists(&project_id_clone, &candidate))
                         .unwrap_or(false);
-                    let branch_in_git = git::branch_exists(&project_path, &candidate);
+                    let branch_in_git = git::branch_exists(&project_path, &candidate, use_wsl);
 
                     if !name_in_storage && !branch_in_git {
                         break candidate;
@@ -582,6 +630,7 @@ pub async fn create_worktree(
             &worktree_path_clone,
             &name_clone,
             &base_clone,
+            use_wsl,
         ) {
             log::error!("Background: Failed to create worktree: {e}");
             let error_event = WorktreeCreateErrorEvent {
@@ -603,7 +652,7 @@ pub async fn create_worktree(
                 "Background: Writing issue context file for issue #{}",
                 ctx.number
             );
-            if let Ok(repo_id) = get_repo_identifier(&project_path) {
+            if let Ok(repo_id) = get_repo_identifier(&project_path, use_wsl) {
                 let repo_key = repo_id.to_key();
                 if let Ok(contexts_dir) = get_github_contexts_dir(&app_clone) {
                     if let Err(e) = std::fs::create_dir_all(&contexts_dir) {
@@ -639,7 +688,7 @@ pub async fn create_worktree(
         // Write PR context file if provided (to shared git-context directory)
         if let Some(ctx) = &pr_context_clone {
             log::trace!("Background: Writing PR context file for PR #{}", ctx.number);
-            if let Ok(repo_id) = get_repo_identifier(&project_path) {
+            if let Ok(repo_id) = get_repo_identifier(&project_path, use_wsl) {
                 let repo_key = repo_id.to_key();
                 if let Ok(contexts_dir) = get_github_contexts_dir(&app_clone) {
                     if let Err(e) = std::fs::create_dir_all(&contexts_dir) {
@@ -648,7 +697,7 @@ pub async fn create_worktree(
                         // Fetch the diff if not already present
                         let ctx_with_diff = if ctx.diff.is_none() {
                             log::debug!("Background: Fetching diff for PR #{}", ctx.number);
-                            let diff = get_pr_diff(&project_path, ctx.number).ok();
+                            let diff = get_pr_diff(&project_path, ctx.number, use_wsl).ok();
                             PullRequestContext {
                                 number: ctx.number,
                                 title: ctx.title.clone(),
@@ -705,8 +754,9 @@ pub async fn create_worktree(
                         Err(e) => {
                             log::error!("Background: Setup script failed: {e}");
                             // Clean up: remove the worktree since setup failed
-                            let _ = git::remove_worktree(&project_path, &worktree_path_clone);
-                            let _ = git::delete_branch(&project_path, &name_clone);
+                            let _ =
+                                git::remove_worktree(&project_path, &worktree_path_clone, use_wsl);
+                            let _ = git::delete_branch(&project_path, &name_clone, use_wsl);
                             let error_event = WorktreeCreateErrorEvent {
                                 id: worktree_id_clone,
                                 project_id: project_id_clone,
@@ -820,6 +870,8 @@ pub async fn create_worktree_from_existing_branch(
 ) -> Result<Worktree, String> {
     log::trace!("Creating worktree from existing branch {branch_name} for project: {project_id}");
 
+    let use_wsl = get_use_wsl_preference(&app).await;
+
     let data = load_projects_data(&app)?;
 
     let project = data
@@ -892,10 +944,12 @@ pub async fn create_worktree_from_existing_branch(
     let branch_name_clone = branch_name.clone();
     let issue_context_clone = issue_context.clone();
     let pr_context_clone = pr_context.clone();
+    let use_wsl_clone = use_wsl;
 
     // Spawn background thread for git operations
     thread::spawn(move || {
         log::trace!("Background: Creating git worktree {name_clone} at {worktree_path_clone} using existing branch {branch_name_clone}");
+        let use_wsl = use_wsl_clone;
 
         // Check if path already exists
         let worktree_path = std::path::Path::new(&worktree_path_clone);
@@ -917,6 +971,7 @@ pub async fn create_worktree_from_existing_branch(
             &project_path,
             &worktree_path_clone,
             &branch_name_clone,
+            use_wsl,
         ) {
             log::error!("Background: Failed to create worktree: {e}");
             let error_event = WorktreeCreateErrorEvent {
@@ -938,7 +993,7 @@ pub async fn create_worktree_from_existing_branch(
                 "Background: Writing issue context file for issue #{}",
                 ctx.number
             );
-            if let Ok(repo_id) = get_repo_identifier(&project_path) {
+            if let Ok(repo_id) = get_repo_identifier(&project_path, use_wsl) {
                 let repo_key = repo_id.to_key();
                 if let Ok(contexts_dir) = get_github_contexts_dir(&app_clone) {
                     if let Err(e) = std::fs::create_dir_all(&contexts_dir) {
@@ -971,7 +1026,7 @@ pub async fn create_worktree_from_existing_branch(
         // Write PR context file if provided
         if let Some(ctx) = &pr_context_clone {
             log::trace!("Background: Writing PR context file for PR #{}", ctx.number);
-            if let Ok(repo_id) = get_repo_identifier(&project_path) {
+            if let Ok(repo_id) = get_repo_identifier(&project_path, use_wsl) {
                 let repo_key = repo_id.to_key();
                 if let Ok(contexts_dir) = get_github_contexts_dir(&app_clone) {
                     if let Err(e) = std::fs::create_dir_all(&contexts_dir) {
@@ -980,7 +1035,7 @@ pub async fn create_worktree_from_existing_branch(
                         // Fetch the diff if not already present
                         let ctx_with_diff = if ctx.diff.is_none() {
                             log::debug!("Background: Fetching diff for PR #{}", ctx.number);
-                            let diff = get_pr_diff(&project_path, ctx.number).ok();
+                            let diff = get_pr_diff(&project_path, ctx.number, use_wsl).ok();
                             PullRequestContext {
                                 number: ctx.number,
                                 title: ctx.title.clone(),
@@ -1035,7 +1090,8 @@ pub async fn create_worktree_from_existing_branch(
                             log::error!("Background: Setup script failed: {e}");
                             // Clean up: remove the worktree since setup failed
                             // Note: Don't delete the branch since it's an existing branch
-                            let _ = git::remove_worktree(&project_path, &worktree_path_clone);
+                            let _ =
+                                git::remove_worktree(&project_path, &worktree_path_clone, use_wsl);
                             let error_event = WorktreeCreateErrorEvent {
                                 id: worktree_id_clone,
                                 project_id: project_id_clone,
@@ -1145,6 +1201,8 @@ pub async fn create_worktree_from_existing_branch(
 pub async fn delete_worktree(app: AppHandle, worktree_id: String) -> Result<(), String> {
     log::trace!("Deleting worktree: {worktree_id}");
 
+    let use_wsl = get_use_wsl_preference(&app).await;
+
     // Cancel any running Claude processes for this worktree FIRST
     crate::chat::registry::cancel_processes_for_worktree(&app, &worktree_id);
 
@@ -1208,14 +1266,16 @@ pub async fn delete_worktree(app: AppHandle, worktree_id: String) -> Result<(), 
     let worktree_path = worktree.path.clone();
     let worktree_branch = worktree.branch.clone();
     let worktree_name = worktree.name.clone();
+    let use_wsl_clone = use_wsl;
 
     // Spawn background thread for git operations only
     // Storage is already updated, so git failures won't corrupt other data
     thread::spawn(move || {
+        let use_wsl = use_wsl_clone;
         log::trace!("Background: Removing git worktree at {worktree_path}");
 
         // Remove the git worktree (this can be slow for large repos)
-        if let Err(e) = git::remove_worktree(&project_path, &worktree_path) {
+        if let Err(e) = git::remove_worktree(&project_path, &worktree_path, use_wsl) {
             log::error!("Background: Failed to remove worktree: {e}");
             let error_event = WorktreeDeleteErrorEvent {
                 id: worktree_id_clone,
@@ -1231,7 +1291,7 @@ pub async fn delete_worktree(app: AppHandle, worktree_id: String) -> Result<(), 
         log::trace!("Background: Git worktree removed, deleting branch {worktree_branch}");
 
         // Delete the branch
-        if let Err(e) = git::delete_branch(&project_path, &worktree_branch) {
+        if let Err(e) = git::delete_branch(&project_path, &worktree_branch, use_wsl) {
             log::error!("Background: Failed to delete branch: {e}");
             let error_event = WorktreeDeleteErrorEvent {
                 id: worktree_id_clone,
@@ -1530,6 +1590,7 @@ pub async fn import_worktree(
 ) -> Result<Worktree, String> {
     log::trace!("Importing worktree: path={path}, project_id={project_id}");
 
+    let use_wsl = get_use_wsl_preference(&app).await;
     let worktree_path = Path::new(&path);
 
     // Verify the path exists
@@ -1549,7 +1610,7 @@ pub async fn import_worktree(
     }
 
     // Get the current branch name from git
-    let branch = git::get_current_branch(&path)?;
+    let branch = git::get_current_branch(&path, use_wsl)?;
 
     // Extract the worktree name from the path (last component)
     let name = worktree_path
@@ -1635,6 +1696,7 @@ pub async fn permanently_delete_worktree(
 ) -> Result<(), String> {
     log::trace!("Permanently deleting archived worktree: {worktree_id}");
 
+    let use_wsl = get_use_wsl_preference(&app).await;
     let data = load_projects_data(&app)?;
 
     let worktree = data
@@ -1670,10 +1732,13 @@ pub async fn permanently_delete_worktree(
     let worktree_branch = worktree.branch.clone();
     let worktree_name = worktree.name.clone();
     let is_base_session = worktree.session_type == SessionType::Base;
+    let use_wsl_clone = use_wsl;
 
     // Spawn background thread for git operations and cleanup only
     // Storage is already updated, so git failures won't corrupt other data
     thread::spawn(move || {
+        let use_wsl = use_wsl_clone;
+
         // Clean up issue context files for this worktree
         if let Err(e) = crate::projects::github_issues::cleanup_issue_contexts_for_worktree(
             &app_clone,
@@ -1695,14 +1760,14 @@ pub async fn permanently_delete_worktree(
             log::trace!("Background: Removing git worktree at {worktree_path}");
 
             // Remove the git worktree (ignore errors if already gone)
-            if let Err(e) = git::remove_worktree(&project_path, &worktree_path) {
+            if let Err(e) = git::remove_worktree(&project_path, &worktree_path, use_wsl) {
                 log::warn!("Background: Failed to remove worktree (may already be deleted): {e}");
             }
 
             log::trace!("Background: Deleting branch {worktree_branch}");
 
             // Delete the branch (ignore errors if already gone)
-            if let Err(e) = git::delete_branch(&project_path, &worktree_branch) {
+            if let Err(e) = git::delete_branch(&project_path, &worktree_branch, use_wsl) {
                 log::warn!("Background: Failed to delete branch (may already be deleted): {e}");
             }
         }
@@ -2008,6 +2073,7 @@ pub async fn open_worktree_in_editor(
 pub async fn open_project_on_github(app: AppHandle, project_id: String) -> Result<(), String> {
     log::trace!("Opening project on GitHub: {project_id}");
 
+    let use_wsl = get_use_wsl_preference(&app).await;
     let data = load_projects_data(&app)?;
     let project = data
         .projects
@@ -2015,7 +2081,7 @@ pub async fn open_project_on_github(app: AppHandle, project_id: String) -> Resul
         .find(|p| p.id == project_id)
         .ok_or_else(|| format!("Project not found: {project_id}"))?;
 
-    let github_url = git::get_github_url(&project.path)?;
+    let github_url = git::get_github_url(&project.path, use_wsl)?;
 
     log::trace!("Opening GitHub URL: {github_url}");
 
@@ -2107,13 +2173,14 @@ pub async fn commit_changes(
 ) -> Result<String, String> {
     log::trace!("Committing changes in worktree: {worktree_id}");
 
+    let use_wsl = get_use_wsl_preference(&app).await;
     let data = load_projects_data(&app)?;
 
     let worktree = data
         .find_worktree(&worktree_id)
         .ok_or_else(|| format!("Worktree not found: {worktree_id}"))?;
 
-    let result = git::commit_changes(&worktree.path, &message, stage_all.unwrap_or(false))?;
+    let result = git::commit_changes(&worktree.path, &message, stage_all.unwrap_or(false), use_wsl)?;
 
     log::trace!(
         "Successfully committed changes in worktree: {} ({})",
@@ -2134,6 +2201,7 @@ pub async fn open_pull_request(
 ) -> Result<String, String> {
     log::trace!("Opening pull request for worktree: {worktree_id}");
 
+    let use_wsl = get_use_wsl_preference(&app).await;
     let data = load_projects_data(&app)?;
 
     let worktree = data
@@ -2146,6 +2214,7 @@ pub async fn open_pull_request(
         title.as_deref(),
         body.as_deref(),
         draft.unwrap_or(false),
+        use_wsl,
     )?;
 
     log::trace!(
@@ -2260,16 +2329,17 @@ pub async fn get_project_branches(
 ) -> Result<Vec<String>, String> {
     log::trace!("Getting branches for project: {project_id}");
 
+    let use_wsl = get_use_wsl_preference(&app).await;
     let data = load_projects_data(&app)?;
     let project = data
         .find_project(&project_id)
         .ok_or_else(|| format!("Project not found: {project_id}"))?;
 
     // Fetch from origin to get latest branches (best effort)
-    let _ = git::fetch_origin(&project.path);
+    let _ = git::fetch_origin(&project.path, use_wsl);
 
     // Try to get remote branches first
-    let remote_branches = git::get_remote_branches(&project.path)?;
+    let remote_branches = git::get_remote_branches(&project.path, use_wsl)?;
 
     if !remote_branches.is_empty() {
         log::trace!(
@@ -2284,7 +2354,7 @@ pub async fn get_project_branches(
     }
 
     // Fall back to local branches
-    let local_branches = git::get_branches(&project.path)?;
+    let local_branches = git::get_branches(&project.path, use_wsl)?;
     log::trace!(
         "Found {} local branches for project {} (no remote)",
         local_branches.len(),
@@ -2342,6 +2412,7 @@ pub async fn rebase_worktree(
 ) -> Result<String, String> {
     log::trace!("Rebasing worktree: {worktree_id}");
 
+    let use_wsl = get_use_wsl_preference(&app).await;
     let data = load_projects_data(&app)?;
 
     let worktree = data
@@ -2356,6 +2427,7 @@ pub async fn rebase_worktree(
         &worktree.path,
         &project.default_branch,
         commit_message.as_deref(),
+        use_wsl,
     )?;
 
     log::trace!("Successfully rebased worktree: {}", worktree.name);
@@ -2367,13 +2439,14 @@ pub async fn rebase_worktree(
 pub async fn has_uncommitted_changes(app: AppHandle, worktree_id: String) -> Result<bool, String> {
     log::trace!("Checking uncommitted changes for worktree: {worktree_id}");
 
+    let use_wsl = get_use_wsl_preference(&app).await;
     let data = load_projects_data(&app)?;
 
     let worktree = data
         .find_worktree(&worktree_id)
         .ok_or_else(|| format!("Worktree not found: {worktree_id}"))?;
 
-    Ok(git::has_uncommitted_changes(&worktree.path))
+    Ok(git::has_uncommitted_changes(&worktree.path, use_wsl))
 }
 
 /// Generate a PR prompt with dynamic context for the AI assistant
@@ -2383,6 +2456,8 @@ pub async fn has_uncommitted_changes(app: AppHandle, worktree_id: String) -> Res
 #[tauri::command]
 pub async fn get_pr_prompt(app: AppHandle, worktree_path: String) -> Result<String, String> {
     log::trace!("Generating PR prompt for worktree: {worktree_path}");
+
+    let use_wsl = get_use_wsl_preference(&app).await;
 
     // Load projects data to find the target branch
     let data = load_projects_data(&app)?;
@@ -2400,7 +2475,7 @@ pub async fn get_pr_prompt(app: AppHandle, worktree_path: String) -> Result<Stri
         .ok_or_else(|| format!("Project not found: {}", worktree.project_id))?;
 
     let target_branch = &project.default_branch;
-    let context = git::generate_pr_context(&worktree_path, target_branch)?;
+    let context = git::generate_pr_context(&worktree_path, target_branch, use_wsl)?;
 
     let mut prompt = format!(
         r#"The user likes the state of the code and wants to open a PR.
@@ -2476,6 +2551,8 @@ pub async fn get_review_prompt(
 ) -> Result<ReviewPromptResponse, String> {
     log::trace!("Generating review prompt for worktree: {worktree_path}");
 
+    let use_wsl = get_use_wsl_preference(&app).await;
+
     // Load projects data to find the target branch
     let data = load_projects_data(&app)?;
 
@@ -2492,12 +2569,12 @@ pub async fn get_review_prompt(
         .ok_or_else(|| format!("Project not found: {}", worktree.project_id))?;
 
     let target_branch = &project.default_branch;
-    let current_branch = git::get_current_branch(&worktree_path)?;
+    let current_branch = git::get_current_branch(&worktree_path, use_wsl)?;
 
     // Get the full git diff (origin/target...HEAD)
     let worktree_path_obj = Path::new(&worktree_path);
     let diff_ref = format!("origin/{target_branch}...HEAD");
-    let diff_output = create_git_command(&["diff", &diff_ref], worktree_path_obj)?
+    let diff_output = create_git_command(&["diff", &diff_ref], worktree_path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to run git diff: {e}"))?;
 
@@ -2513,6 +2590,7 @@ pub async fn get_review_prompt(
     let log_output = create_git_command(
         &["log", &log_ref, "--pretty=format:%h %s"],
         worktree_path_obj,
+        use_wsl,
     )?
     .output()
     .map_err(|e| format!("Failed to run git log: {e}"))?;
@@ -2525,7 +2603,7 @@ pub async fn get_review_prompt(
     };
 
     // Get uncommitted changes (staged + unstaged for tracked files)
-    let uncommitted_output = create_git_command(&["diff", "HEAD"], worktree_path_obj)?
+    let uncommitted_output = create_git_command(&["diff", "HEAD"], worktree_path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to run git diff HEAD: {e}"))?;
 
@@ -2539,6 +2617,7 @@ pub async fn get_review_prompt(
     let untracked_output = create_git_command(
         &["ls-files", "--others", "--exclude-standard"],
         worktree_path_obj,
+        use_wsl,
     )?
     .output()
     .map_err(|e| format!("Failed to list untracked files: {e}"))?;
@@ -2835,13 +2914,15 @@ pub async fn update_worktree_cached_status(
 /// - "branch": All changes in current branch vs base branch
 #[tauri::command]
 pub async fn get_git_diff(
+    app: AppHandle,
     worktree_path: String,
     diff_type: String,
     base_branch: Option<String>,
 ) -> Result<super::git_status::GitDiff, String> {
     log::trace!("Getting {diff_type} diff for {worktree_path}");
 
-    super::git_status::get_git_diff(&worktree_path, &diff_type, base_branch.as_deref())
+    let use_wsl = get_use_wsl_preference(&app).await;
+    super::git_status::get_git_diff(&worktree_path, &diff_type, base_branch.as_deref(), use_wsl)
 }
 
 /// Reorder projects in the sidebar
@@ -2977,10 +3058,10 @@ fn extract_structured_output(output: &str) -> Result<String, String> {
 }
 
 /// Get git diff between current branch and target branch
-fn get_branch_diff(repo_path: &str, target_branch: &str) -> Result<String, String> {
+fn get_branch_diff(repo_path: &str, target_branch: &str, use_wsl: bool) -> Result<String, String> {
     let repo_path_obj = Path::new(repo_path);
     let diff_ref = format!("origin/{target_branch}...HEAD");
-    let output = create_git_command(&["diff", &diff_ref], repo_path_obj)?
+    let output = create_git_command(&["diff", &diff_ref], repo_path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to get git diff: {e}"))?;
 
@@ -3004,10 +3085,10 @@ fn get_branch_diff(repo_path: &str, target_branch: &str) -> Result<String, Strin
 }
 
 /// Get commit messages between current branch and target branch
-fn get_branch_commits(repo_path: &str, target_branch: &str) -> Result<String, String> {
+fn get_branch_commits(repo_path: &str, target_branch: &str, use_wsl: bool) -> Result<String, String> {
     let repo_path_obj = Path::new(repo_path);
     let log_ref = format!("origin/{target_branch}..HEAD");
-    let output = create_git_command(&["log", "--oneline", &log_ref], repo_path_obj)?
+    let output = create_git_command(&["log", "--oneline", &log_ref], repo_path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to get git log: {e}"))?;
 
@@ -3020,10 +3101,10 @@ fn get_branch_commits(repo_path: &str, target_branch: &str) -> Result<String, St
 }
 
 /// Count commits between current branch and target branch
-fn count_branch_commits(repo_path: &str, target_branch: &str) -> Result<u32, String> {
+fn count_branch_commits(repo_path: &str, target_branch: &str, use_wsl: bool) -> Result<u32, String> {
     let repo_path_obj = Path::new(repo_path);
     let count_ref = format!("origin/{target_branch}..HEAD");
-    let output = create_git_command(&["rev-list", "--count", &count_ref], repo_path_obj)?
+    let output = create_git_command(&["rev-list", "--count", &count_ref], repo_path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to count commits: {e}"))?;
 
@@ -3044,6 +3125,7 @@ fn generate_pr_content(
     current_branch: &str,
     target_branch: &str,
     custom_prompt: Option<&str>,
+    use_wsl: bool,
 ) -> Result<PrContentResponse, String> {
     let cli_path = get_cli_binary_path(app)?;
 
@@ -3052,13 +3134,13 @@ fn generate_pr_content(
     }
 
     // Get diff and commits
-    let diff = get_branch_diff(repo_path, target_branch)?;
+    let diff = get_branch_diff(repo_path, target_branch, use_wsl)?;
     if diff.trim().is_empty() {
         return Err("No changes to create PR for".to_string());
     }
 
-    let commits = get_branch_commits(repo_path, target_branch)?;
-    let commit_count = count_branch_commits(repo_path, target_branch)?;
+    let commits = get_branch_commits(repo_path, target_branch, use_wsl)?;
+    let commit_count = count_branch_commits(repo_path, target_branch, use_wsl)?;
 
     // Build prompt - use custom if provided and non-empty, otherwise use default
     let prompt_template = custom_prompt
@@ -3170,6 +3252,8 @@ pub async fn create_pr_with_ai_content(
 ) -> Result<CreatePrResponse, String> {
     log::trace!("Creating PR for: {worktree_path}");
 
+    let use_wsl = get_use_wsl_preference(&app).await;
+
     // Load project data to get target branch
     let data = load_projects_data(&app)?;
     let worktree = data
@@ -3183,7 +3267,7 @@ pub async fn create_pr_with_ai_content(
         .ok_or_else(|| format!("Project not found: {}", worktree.project_id))?;
 
     let target_branch = &project.default_branch;
-    let current_branch = git::get_current_branch(&worktree_path)?;
+    let current_branch = git::get_current_branch(&worktree_path, use_wsl)?;
 
     // Check if we're on the target branch (can't create PR to same branch)
     if current_branch == *target_branch {
@@ -3193,13 +3277,13 @@ pub async fn create_pr_with_ai_content(
     }
 
     // Stage and commit uncommitted changes if any
-    let uncommitted = git::get_uncommitted_count(&worktree_path)?;
+    let uncommitted = git::get_uncommitted_count(&worktree_path, use_wsl)?;
     let worktree_path_obj = Path::new(&worktree_path);
     if uncommitted > 0 {
         log::trace!("Staging and committing {uncommitted} uncommitted changes");
 
         // Stage all changes
-        let stage_output = create_git_command(&["add", "-A"], worktree_path_obj)?
+        let stage_output = create_git_command(&["add", "-A"], worktree_path_obj, use_wsl)?
             .output()
             .map_err(|e| format!("Failed to stage changes: {e}"))?;
 
@@ -3210,7 +3294,7 @@ pub async fn create_pr_with_ai_content(
 
         // Commit with a generic message (the PR will have the real description)
         let commit_output =
-            create_git_command(&["commit", "-m", "chore: prepare for PR"], worktree_path_obj)?
+            create_git_command(&["commit", "-m", "chore: prepare for PR"], worktree_path_obj, use_wsl)?
                 .output()
                 .map_err(|e| format!("Failed to commit: {e}"))?;
 
@@ -3225,7 +3309,7 @@ pub async fn create_pr_with_ai_content(
 
     // Push the branch
     log::trace!("Pushing branch to remote");
-    let push_output = create_git_command(&["push", "-u", "origin", "HEAD"], worktree_path_obj)?
+    let push_output = create_git_command(&["push", "-u", "origin", "HEAD"], worktree_path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to push: {e}"))?;
 
@@ -3244,6 +3328,7 @@ pub async fn create_pr_with_ai_content(
         &current_branch,
         target_branch,
         custom_prompt.as_deref(),
+        use_wsl,
     )?;
 
     log::trace!("Generated PR title: {}", pr_content.title);
@@ -3262,6 +3347,7 @@ pub async fn create_pr_with_ai_content(
             &pr_content.body,
         ],
         worktree_path_obj,
+        use_wsl,
     )?
     .output()
     .map_err(|e| format!("Failed to run gh pr create: {e}"))?;
@@ -3325,9 +3411,9 @@ pub struct CreateCommitResponse {
 }
 
 /// Get git status output
-fn get_git_status(repo_path: &str) -> Result<String, String> {
+fn get_git_status(repo_path: &str, use_wsl: bool) -> Result<String, String> {
     let repo_path_obj = Path::new(repo_path);
-    let output = create_git_command(&["status", "--short"], repo_path_obj)?
+    let output = create_git_command(&["status", "--short"], repo_path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to get git status: {e}"))?;
 
@@ -3335,9 +3421,9 @@ fn get_git_status(repo_path: &str) -> Result<String, String> {
 }
 
 /// Get staged diff
-fn get_staged_diff(repo_path: &str) -> Result<String, String> {
+fn get_staged_diff(repo_path: &str, use_wsl: bool) -> Result<String, String> {
     let repo_path_obj = Path::new(repo_path);
-    let output = create_git_command(&["diff", "--cached"], repo_path_obj)?
+    let output = create_git_command(&["diff", "--cached"], repo_path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to get staged diff: {e}"))?;
 
@@ -3356,10 +3442,10 @@ fn get_staged_diff(repo_path: &str) -> Result<String, String> {
 }
 
 /// Get recent commit messages for style reference
-fn get_recent_commits(repo_path: &str, count: u32) -> Result<String, String> {
+fn get_recent_commits(repo_path: &str, count: u32, use_wsl: bool) -> Result<String, String> {
     let repo_path_obj = Path::new(repo_path);
     let count_arg = format!("-{count}");
-    let output = create_git_command(&["log", "--oneline", &count_arg], repo_path_obj)?
+    let output = create_git_command(&["log", "--oneline", &count_arg], repo_path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to get recent commits: {e}"))?;
 
@@ -3367,9 +3453,9 @@ fn get_recent_commits(repo_path: &str, count: u32) -> Result<String, String> {
 }
 
 /// Get remote info
-fn get_remote_info(repo_path: &str) -> Result<String, String> {
+fn get_remote_info(repo_path: &str, use_wsl: bool) -> Result<String, String> {
     let repo_path_obj = Path::new(repo_path);
-    let output = create_git_command(&["remote", "-v"], repo_path_obj)?
+    let output = create_git_command(&["remote", "-v"], repo_path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to get remote info: {e}"))?;
 
@@ -3377,9 +3463,9 @@ fn get_remote_info(repo_path: &str) -> Result<String, String> {
 }
 
 /// Stage all changes
-fn stage_all_changes(repo_path: &str) -> Result<(), String> {
+fn stage_all_changes(repo_path: &str, use_wsl: bool) -> Result<(), String> {
     let repo_path_obj = Path::new(repo_path);
-    let output = create_git_command(&["add", "-A"], repo_path_obj)?
+    let output = create_git_command(&["add", "-A"], repo_path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to stage changes: {e}"))?;
 
@@ -3392,9 +3478,9 @@ fn stage_all_changes(repo_path: &str) -> Result<(), String> {
 }
 
 /// Create a git commit with the given message
-fn create_git_commit_cmd(repo_path: &str, message: &str) -> Result<String, String> {
+fn create_git_commit_cmd(repo_path: &str, message: &str, use_wsl: bool) -> Result<String, String> {
     let repo_path_obj = Path::new(repo_path);
-    let output = create_git_command(&["commit", "-m", message], repo_path_obj)?
+    let output = create_git_command(&["commit", "-m", message], repo_path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to create commit: {e}"))?;
 
@@ -3404,7 +3490,7 @@ fn create_git_commit_cmd(repo_path: &str, message: &str) -> Result<String, Strin
     }
 
     // Get the commit hash
-    let hash_output = create_git_command(&["rev-parse", "HEAD"], repo_path_obj)?
+    let hash_output = create_git_command(&["rev-parse", "HEAD"], repo_path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to get commit hash: {e}"))?;
 
@@ -3414,9 +3500,9 @@ fn create_git_commit_cmd(repo_path: &str, message: &str) -> Result<String, Strin
 }
 
 /// Push to remote
-fn push_to_remote(repo_path: &str) -> Result<(), String> {
+fn push_to_remote(repo_path: &str, use_wsl: bool) -> Result<(), String> {
     let repo_path_obj = Path::new(repo_path);
-    let output = create_git_command(&["push"], repo_path_obj)?
+    let output = create_git_command(&["push"], repo_path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to push: {e}"))?;
 
@@ -3512,24 +3598,26 @@ pub async fn create_commit_with_ai(
 ) -> Result<CreateCommitResponse, String> {
     log::trace!("Creating commit for: {worktree_path}");
 
+    let use_wsl = get_use_wsl_preference(&app).await;
+
     // 1. Check for uncommitted changes
-    let status = get_git_status(&worktree_path)?;
+    let status = get_git_status(&worktree_path, use_wsl)?;
     if status.trim().is_empty() {
         return Err("No changes to commit".to_string());
     }
 
     // 2. Stage all changes
-    stage_all_changes(&worktree_path)?;
+    stage_all_changes(&worktree_path, use_wsl)?;
 
     // 3. Get staged diff
-    let diff = get_staged_diff(&worktree_path)?;
+    let diff = get_staged_diff(&worktree_path, use_wsl)?;
     if diff.trim().is_empty() {
         return Err("No staged changes to commit".to_string());
     }
 
     // 4. Get context for commit message generation
-    let recent_commits = get_recent_commits(&worktree_path, 10)?;
-    let remote_info = get_remote_info(&worktree_path)?;
+    let recent_commits = get_recent_commits(&worktree_path, 10, use_wsl)?;
+    let remote_info = get_remote_info(&worktree_path, use_wsl)?;
 
     // 5. Build prompt - use custom if provided and non-empty, otherwise use default
     let prompt_template = custom_prompt
@@ -3553,13 +3641,13 @@ pub async fn create_commit_with_ai(
     );
 
     // 7. Create the commit
-    let commit_hash = create_git_commit_cmd(&worktree_path, &response.message)?;
+    let commit_hash = create_git_commit_cmd(&worktree_path, &response.message, use_wsl)?;
 
     log::trace!("Created commit: {commit_hash}");
 
     // 8. Push if requested
     let pushed = if push {
-        push_to_remote(&worktree_path)?;
+        push_to_remote(&worktree_path, use_wsl)?;
         log::trace!("Pushed to remote");
         true
     } else {
@@ -3708,6 +3796,8 @@ pub async fn run_review_with_ai(
 ) -> Result<ReviewResponse, String> {
     log::trace!("Running AI code review for: {worktree_path}");
 
+    let use_wsl = get_use_wsl_preference(&app).await;
+
     // Load projects data to find the target branch
     let data = load_projects_data(&app)?;
 
@@ -3724,17 +3814,17 @@ pub async fn run_review_with_ai(
         .ok_or_else(|| format!("Project not found: {}", worktree.project_id))?;
 
     let target_branch = &project.default_branch;
-    let current_branch = git::get_current_branch(&worktree_path)?;
+    let current_branch = git::get_current_branch(&worktree_path, use_wsl)?;
 
     // Get branch diff
-    let diff = get_branch_diff(&worktree_path, target_branch)?;
+    let diff = get_branch_diff(&worktree_path, target_branch, use_wsl)?;
 
     // Get commit history
-    let commits = get_branch_commits(&worktree_path, target_branch)?;
+    let commits = get_branch_commits(&worktree_path, target_branch, use_wsl)?;
 
     // Get uncommitted changes
     let worktree_path_obj = Path::new(&worktree_path);
-    let uncommitted_output = create_git_command(&["diff", "HEAD"], worktree_path_obj)?
+    let uncommitted_output = create_git_command(&["diff", "HEAD"], worktree_path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to get uncommitted diff: {e}"))?;
 
@@ -3787,16 +3877,18 @@ pub async fn run_review_with_ai(
 
 /// Pull changes from remote origin for the specified base branch
 #[tauri::command]
-pub async fn git_pull(worktree_path: String, base_branch: String) -> Result<String, String> {
+pub async fn git_pull(app: AppHandle, worktree_path: String, base_branch: String) -> Result<String, String> {
     log::trace!("Pulling changes for worktree: {worktree_path}, base branch: {base_branch}");
-    git::git_pull(&worktree_path, &base_branch)
+    let use_wsl = get_use_wsl_preference(&app).await;
+    git::git_pull(&worktree_path, &base_branch, use_wsl)
 }
 
 /// Push current branch to remote origin
 #[tauri::command]
-pub async fn git_push(worktree_path: String) -> Result<String, String> {
+pub async fn git_push(app: AppHandle, worktree_path: String) -> Result<String, String> {
     log::trace!("Pushing changes for worktree: {worktree_path}");
-    git::git_push(&worktree_path)
+    let use_wsl = get_use_wsl_preference(&app).await;
+    git::git_push(&worktree_path, use_wsl)
 }
 
 // =============================================================================
@@ -3837,6 +3929,8 @@ pub async fn merge_worktree_to_base(
 ) -> Result<MergeWorktreeResponse, String> {
     log::trace!("Merging worktree to base: {worktree_id} (type: {merge_type:?})");
 
+    let use_wsl = get_use_wsl_preference(&app).await;
+
     // Load projects data
     let data = load_projects_data(&app)?;
 
@@ -3864,17 +3958,17 @@ pub async fn merge_worktree_to_base(
     }
 
     // Auto-commit uncommitted changes in worktree using AI-generated message
-    if git::has_uncommitted_changes(&worktree.path) {
+    if git::has_uncommitted_changes(&worktree.path, use_wsl) {
         log::trace!("Auto-committing uncommitted changes before merge with AI message");
 
         // Stage all changes
-        stage_all_changes(&worktree.path)?;
+        stage_all_changes(&worktree.path, use_wsl)?;
 
         // Get context for commit message generation
-        let status = get_git_status(&worktree.path).unwrap_or_default();
-        let diff = get_staged_diff(&worktree.path).unwrap_or_default();
-        let recent_commits = get_recent_commits(&worktree.path, 10).unwrap_or_default();
-        let remote_info = get_remote_info(&worktree.path).unwrap_or_default();
+        let status = get_git_status(&worktree.path, use_wsl).unwrap_or_default();
+        let diff = get_staged_diff(&worktree.path, use_wsl).unwrap_or_default();
+        let recent_commits = get_recent_commits(&worktree.path, 10, use_wsl).unwrap_or_default();
+        let remote_info = get_remote_info(&worktree.path, use_wsl).unwrap_or_default();
 
         // Build prompt and generate commit message
         let prompt = COMMIT_MESSAGE_PROMPT
@@ -3886,7 +3980,7 @@ pub async fn merge_worktree_to_base(
         match generate_commit_message(&app, &prompt) {
             Ok(response) => {
                 // Create the commit with AI-generated message
-                match create_git_commit_cmd(&worktree.path, &response.message) {
+                match create_git_commit_cmd(&worktree.path, &response.message, use_wsl) {
                     Ok(hash) => log::trace!("Auto-committed with AI message: {hash}"),
                     Err(e) => {
                         if !e.contains("Nothing to commit") && !e.contains("nothing to commit") {
@@ -3898,7 +3992,7 @@ pub async fn merge_worktree_to_base(
             Err(e) => {
                 // Fallback to simple commit message if AI fails
                 log::warn!("AI commit message generation failed, using fallback: {e}");
-                match create_git_commit_cmd(&worktree.path, "Auto-commit before merge") {
+                match create_git_commit_cmd(&worktree.path, "Auto-commit before merge", use_wsl) {
                     Ok(hash) => log::trace!("Auto-committed with fallback message: {hash}"),
                     Err(e) => {
                         if !e.contains("Nothing to commit") && !e.contains("nothing to commit") {
@@ -3917,6 +4011,7 @@ pub async fn merge_worktree_to_base(
         &worktree.branch,
         &project.default_branch,
         merge_type,
+        use_wsl,
     );
 
     match merge_result {
@@ -3936,13 +4031,13 @@ pub async fn merge_worktree_to_base(
             }
 
             // Remove the worktree
-            if let Err(e) = git::remove_worktree(&project.path, &worktree.path) {
+            if let Err(e) = git::remove_worktree(&project.path, &worktree.path, use_wsl) {
                 log::error!("Failed to remove worktree after merge: {e}");
                 // Continue anyway - merge succeeded
             }
 
             // Delete the branch
-            if let Err(e) = git::delete_branch(&project.path, &worktree.branch) {
+            if let Err(e) = git::delete_branch(&project.path, &worktree.branch, use_wsl) {
                 log::error!("Failed to delete branch after merge: {e}");
                 // Continue anyway - merge succeeded
             }
@@ -4023,6 +4118,7 @@ pub async fn cleanup_old_archives(
         });
     }
 
+    let use_wsl = get_use_wsl_preference(&app).await;
     log::trace!("Running archive cleanup with {retention_days} day retention");
 
     let cutoff = now() - (retention_days as u64 * 86400);
@@ -4065,12 +4161,12 @@ pub async fn cleanup_old_archives(
         if let Some(proj) = project {
             if worktree.session_type != SessionType::Base {
                 // Remove git worktree (ignore errors if already gone)
-                if let Err(e) = git::remove_worktree(&proj.path, &worktree.path) {
+                if let Err(e) = git::remove_worktree(&proj.path, &worktree.path, use_wsl) {
                     log::warn!("Failed to remove worktree (may be gone): {e}");
                 }
 
                 // Delete branch (ignore errors if already gone)
-                if let Err(e) = git::delete_branch(&proj.path, &worktree.branch) {
+                if let Err(e) = git::delete_branch(&proj.path, &worktree.branch, use_wsl) {
                     log::warn!("Failed to delete branch (may be gone): {e}");
                 }
             }
@@ -4164,6 +4260,7 @@ pub async fn cleanup_old_archives(
 pub async fn delete_all_archives(app: AppHandle) -> Result<CleanupResult, String> {
     log::trace!("Deleting all archived items");
 
+    let use_wsl = get_use_wsl_preference(&app).await;
     let mut deleted_worktrees = 0u32;
     let mut deleted_sessions = 0u32;
 
@@ -4193,12 +4290,12 @@ pub async fn delete_all_archives(app: AppHandle) -> Result<CleanupResult, String
         if let Some(proj) = project {
             if worktree.session_type != SessionType::Base {
                 // Remove git worktree (ignore errors if already gone)
-                if let Err(e) = git::remove_worktree(&proj.path, &worktree.path) {
+                if let Err(e) = git::remove_worktree(&proj.path, &worktree.path, use_wsl) {
                     log::warn!("Failed to remove worktree (may be gone): {e}");
                 }
 
                 // Delete branch (ignore errors if already gone)
-                if let Err(e) = git::delete_branch(&proj.path, &worktree.branch) {
+                if let Err(e) = git::delete_branch(&proj.path, &worktree.branch, use_wsl) {
                     log::warn!("Failed to delete branch (may be gone): {e}");
                 }
             }
@@ -4555,6 +4652,7 @@ pub async fn fetch_worktrees_status(app: AppHandle, project_id: String) -> Resul
         "[fetch_worktrees_status] Fetching status for all worktrees in project: {project_id}"
     );
 
+    let use_wsl = get_use_wsl_preference(&app).await;
     let data = load_projects_data(&app)?;
 
     // Get the project to find default branch
@@ -4591,6 +4689,7 @@ pub async fn fetch_worktrees_status(app: AppHandle, project_id: String) -> Resul
     for worktree in worktrees {
         let app_clone = app.clone();
         let base_branch_clone = base_branch.clone();
+        let use_wsl_clone = use_wsl;
 
         thread::spawn(move || {
             let info = ActiveWorktreeInfo {
@@ -4599,6 +4698,7 @@ pub async fn fetch_worktrees_status(app: AppHandle, project_id: String) -> Resul
                 base_branch: base_branch_clone,
                 pr_number: worktree.pr_number,
                 pr_url: worktree.pr_url.clone(),
+                use_wsl: use_wsl_clone,
             };
 
             // Fetch git status (this may take a moment as it runs git commands)

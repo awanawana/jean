@@ -78,6 +78,7 @@ pub fn get_pr_status(
     pr_number: u32,
     pr_url: &str,
     worktree_id: &str,
+    use_wsl: bool,
 ) -> Result<PrStatus, String> {
     log::trace!("Fetching PR status for #{pr_number} in {repo_path}");
 
@@ -92,6 +93,7 @@ pub fn get_pr_status(
             "state,isDraft,reviewDecision,statusCheckRollup",
         ],
         Path::new(repo_path),
+        use_wsl,
     )?
     .output()
     .map_err(|e| format!("Failed to run gh pr view: {e}"))?;

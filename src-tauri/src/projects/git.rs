@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use super::types::{JeanConfig, MergeType};
 use crate::gh_cli::create_gh_command;
-use crate::platform::shell::{create_git_command, git_dir_exists, path_exists, path_is_dir};
+use crate::platform::shell::{
+    create_git_command, create_git_command_with_env, git_dir_exists, path_exists, path_is_dir,
+};
 
 /// Repository identifier extracted from GitHub remote URL
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -26,8 +28,8 @@ impl RepoIdentifier {
 /// Returns an error if:
 /// - The repository has no origin remote
 /// - The remote URL is not a GitHub URL
-pub fn get_repo_identifier(repo_path: &str) -> Result<RepoIdentifier, String> {
-    let github_url = get_github_url(repo_path)?;
+pub fn get_repo_identifier(repo_path: &str, use_wsl: bool) -> Result<RepoIdentifier, String> {
+    let github_url = get_github_url(repo_path, use_wsl)?;
 
     // Parse owner/repo from URL: https://github.com/owner/repo
     let url_without_prefix = github_url
@@ -93,7 +95,7 @@ pub fn validate_git_repo(path: &str) -> Result<bool, String> {
 /// Initialize a new git repository at the given path
 ///
 /// Creates the directory if it doesn't exist, runs `git init`, and creates an initial commit
-pub fn init_repo(path: &str) -> Result<(), String> {
+pub fn init_repo(path: &str, use_wsl: bool) -> Result<(), String> {
     let path_obj = Path::new(path);
 
     // Create directory if it doesn't exist
@@ -109,7 +111,7 @@ pub fn init_repo(path: &str) -> Result<(), String> {
     }
 
     // Run git init
-    let output = create_git_command(&["init"], path_obj)?
+    let output = create_git_command(&["init"], path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to run git init: {e}"))?;
 
@@ -123,7 +125,7 @@ pub fn init_repo(path: &str) -> Result<(), String> {
     std::fs::write(&gitkeep_path, "").map_err(|e| format!("Failed to create .gitkeep: {e}"))?;
 
     // Stage the file
-    let add_output = create_git_command(&["add", ".gitkeep"], path_obj)?
+    let add_output = create_git_command(&["add", ".gitkeep"], path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to run git add: {e}"))?;
 
@@ -133,9 +135,10 @@ pub fn init_repo(path: &str) -> Result<(), String> {
     }
 
     // Create initial commit
-    let commit_output = create_git_command(&["commit", "-m", "jean's init vibe commit"], path_obj)?
-        .output()
-        .map_err(|e| format!("Failed to run git commit: {e}"))?;
+    let commit_output =
+        create_git_command(&["commit", "-m", "jean's init vibe commit"], path_obj, use_wsl)?
+            .output()
+            .map_err(|e| format!("Failed to run git commit: {e}"))?;
 
     if !commit_output.status.success() {
         let stderr = String::from_utf8_lossy(&commit_output.stderr);
@@ -164,8 +167,8 @@ pub fn get_repo_name(path: &str) -> Result<String, String> {
 /// Get the GitHub URL for a repository
 ///
 /// Converts git remote URLs to HTTPS GitHub URLs
-pub fn get_github_url(repo_path: &str) -> Result<String, String> {
-    let output = create_git_command(&["remote", "get-url", "origin"], Path::new(repo_path))?
+pub fn get_github_url(repo_path: &str, use_wsl: bool) -> Result<String, String> {
+    let output = create_git_command(&["remote", "get-url", "origin"], Path::new(repo_path), use_wsl)?
         .output()
         .map_err(|e| format!("Failed to get remote URL: {e}"))?;
 
@@ -196,10 +199,11 @@ pub fn get_github_url(repo_path: &str) -> Result<String, String> {
 }
 
 /// Get the current branch name (HEAD) for a repository
-pub fn get_current_branch(repo_path: &str) -> Result<String, String> {
-    let output = create_git_command(&["rev-parse", "--abbrev-ref", "HEAD"], Path::new(repo_path))?
-        .output()
-        .map_err(|e| format!("Failed to run git command: {e}"))?;
+pub fn get_current_branch(repo_path: &str, use_wsl: bool) -> Result<String, String> {
+    let output =
+        create_git_command(&["rev-parse", "--abbrev-ref", "HEAD"], Path::new(repo_path), use_wsl)?
+            .output()
+            .map_err(|e| format!("Failed to run git command: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -211,17 +215,21 @@ pub fn get_current_branch(repo_path: &str) -> Result<String, String> {
 }
 
 /// Check if a branch exists in a repository
-pub fn branch_exists(repo_path: &str, branch_name: &str) -> bool {
+pub fn branch_exists(repo_path: &str, branch_name: &str, use_wsl: bool) -> bool {
     let refs_head = format!("refs/heads/{branch_name}");
-    create_git_command(&["rev-parse", "--verify", &refs_head], Path::new(repo_path))
-        .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()))
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    create_git_command(
+        &["rev-parse", "--verify", &refs_head],
+        Path::new(repo_path),
+        use_wsl,
+    )
+    .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()))
+    .map(|o| o.status.success())
+    .unwrap_or(false)
 }
 
 /// Check if a repository has any commits
-pub fn has_commits(repo_path: &str) -> bool {
-    create_git_command(&["rev-parse", "HEAD"], Path::new(repo_path))
+pub fn has_commits(repo_path: &str, use_wsl: bool) -> bool {
+    create_git_command(&["rev-parse", "HEAD"], Path::new(repo_path), use_wsl)
         .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()))
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -232,16 +240,20 @@ pub fn has_commits(repo_path: &str) -> bool {
 /// Tries the provided branch first, then falls back to common defaults (main, master)
 /// or the current branch if none of those exist.
 /// Returns an error if the repository has no commits yet.
-pub fn get_valid_base_branch(repo_path: &str, preferred_branch: &str) -> Result<String, String> {
+pub fn get_valid_base_branch(
+    repo_path: &str,
+    preferred_branch: &str,
+    use_wsl: bool,
+) -> Result<String, String> {
     // First check if repo has any commits - worktrees require at least one commit
-    if !has_commits(repo_path) {
+    if !has_commits(repo_path, use_wsl) {
         return Err("Cannot create worktree: repository has no commits yet. \
              Please make an initial commit first."
             .to_string());
     }
 
     // Try preferred branch first
-    if branch_exists(repo_path, preferred_branch) {
+    if branch_exists(repo_path, preferred_branch, use_wsl) {
         return Ok(preferred_branch.to_string());
     }
 
@@ -249,14 +261,14 @@ pub fn get_valid_base_branch(repo_path: &str, preferred_branch: &str) -> Result<
 
     // Try common defaults
     for fallback in &["main", "master"] {
-        if branch_exists(repo_path, fallback) {
+        if branch_exists(repo_path, fallback, use_wsl) {
             log::trace!("Using fallback branch: {fallback}");
             return Ok(fallback.to_string());
         }
     }
 
     // Last resort: use current branch
-    let current = get_current_branch(repo_path)?;
+    let current = get_current_branch(repo_path, use_wsl)?;
     log::trace!("Using current branch as fallback: {current}");
     Ok(current)
 }
@@ -266,15 +278,20 @@ pub fn get_valid_base_branch(repo_path: &str, preferred_branch: &str) -> Result<
 /// # Arguments
 /// * `repo_path` - Path to the repository (can be a worktree)
 /// * `new_name` - The new name for the branch
+/// * `use_wsl` - Whether to use WSL on Windows
 ///
 /// Returns the old branch name on success
-pub fn rename_branch(repo_path: &str, new_name: &str) -> Result<String, String> {
+pub fn rename_branch(repo_path: &str, new_name: &str, use_wsl: bool) -> Result<String, String> {
     log::trace!("Renaming current branch to {new_name} in {repo_path}");
 
     // First check if we're in detached HEAD state
-    let head_check = create_git_command(&["symbolic-ref", "--short", "HEAD"], Path::new(repo_path))?
-        .output()
-        .map_err(|e| format!("Failed to check HEAD state: {e}"))?;
+    let head_check = create_git_command(
+        &["symbolic-ref", "--short", "HEAD"],
+        Path::new(repo_path),
+        use_wsl,
+    )?
+    .output()
+    .map_err(|e| format!("Failed to check HEAD state: {e}"))?;
 
     if !head_check.status.success() {
         return Err("Cannot rename branch: HEAD is detached".to_string());
@@ -291,23 +308,24 @@ pub fn rename_branch(repo_path: &str, new_name: &str) -> Result<String, String> 
     }
 
     // Check if target branch name already exists
-    let branch_exists = create_git_command(
+    let branch_exists_check = create_git_command(
         &["rev-parse", "--verify", &format!("refs/heads/{new_name}")],
         Path::new(repo_path),
+        use_wsl,
     )
     .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()))
     .map(|o| o.status.success())
     .unwrap_or(false);
 
-    let final_name = if branch_exists {
+    let final_name = if branch_exists_check {
         // Append suffix to make unique
-        find_unique_branch_name(repo_path, new_name)?
+        find_unique_branch_name(repo_path, new_name, use_wsl)?
     } else {
         new_name.to_string()
     };
 
     // Perform the rename
-    let output = create_git_command(&["branch", "-m", &final_name], Path::new(repo_path))?
+    let output = create_git_command(&["branch", "-m", &final_name], Path::new(repo_path), use_wsl)?
         .output()
         .map_err(|e| format!("Failed to rename branch: {e}"))?;
 
@@ -321,7 +339,7 @@ pub fn rename_branch(repo_path: &str, new_name: &str) -> Result<String, String> 
 }
 
 /// Find a unique branch name by appending a random 4-char suffix
-fn find_unique_branch_name(repo_path: &str, base_name: &str) -> Result<String, String> {
+fn find_unique_branch_name(repo_path: &str, base_name: &str, use_wsl: bool) -> Result<String, String> {
     use rand::Rng;
 
     for _ in 0..10 {
@@ -336,6 +354,7 @@ fn find_unique_branch_name(repo_path: &str, base_name: &str) -> Result<String, S
         let exists = create_git_command(
             &["rev-parse", "--verify", &format!("refs/heads/{candidate}")],
             Path::new(repo_path),
+            use_wsl,
         )
         .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()))
         .map(|o| o.status.success())
@@ -350,10 +369,14 @@ fn find_unique_branch_name(repo_path: &str, base_name: &str) -> Result<String, S
 }
 
 /// Get list of local branches for a repository
-pub fn get_branches(repo_path: &str) -> Result<Vec<String>, String> {
-    let output = create_git_command(&["branch", "--format=%(refname:short)"], Path::new(repo_path))?
-        .output()
-        .map_err(|e| format!("Failed to run git command: {e}"))?;
+pub fn get_branches(repo_path: &str, use_wsl: bool) -> Result<Vec<String>, String> {
+    let output = create_git_command(
+        &["branch", "--format=%(refname:short)"],
+        Path::new(repo_path),
+        use_wsl,
+    )?
+    .output()
+    .map_err(|e| format!("Failed to run git command: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -370,12 +393,13 @@ pub fn get_branches(repo_path: &str) -> Result<Vec<String>, String> {
 }
 
 /// Pull changes from remote origin for the specified base branch
-pub fn git_pull(repo_path: &str, base_branch: &str) -> Result<String, String> {
+pub fn git_pull(repo_path: &str, base_branch: &str, use_wsl: bool) -> Result<String, String> {
     log::trace!("Pulling from origin/{base_branch} in {repo_path}");
 
-    let output = create_git_command(&["pull", "origin", base_branch], Path::new(repo_path))?
-        .output()
-        .map_err(|e| format!("Failed to run git pull: {e}"))?;
+    let output =
+        create_git_command(&["pull", "origin", base_branch], Path::new(repo_path), use_wsl)?
+            .output()
+            .map_err(|e| format!("Failed to run git pull: {e}"))?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -389,10 +413,10 @@ pub fn git_pull(repo_path: &str, base_branch: &str) -> Result<String, String> {
 }
 
 /// Push current branch to remote origin
-pub fn git_push(repo_path: &str) -> Result<String, String> {
+pub fn git_push(repo_path: &str, use_wsl: bool) -> Result<String, String> {
     log::trace!("Pushing to origin in {repo_path}");
 
-    let output = create_git_command(&["push"], Path::new(repo_path))?
+    let output = create_git_command(&["push"], Path::new(repo_path), use_wsl)?
         .output()
         .map_err(|e| format!("Failed to run git push: {e}"))?;
 
@@ -411,10 +435,10 @@ pub fn git_push(repo_path: &str) -> Result<String, String> {
 }
 
 /// Fetch from remote origin (best effort, ignores errors if no remote)
-pub fn fetch_origin(repo_path: &str) -> Result<(), String> {
+pub fn fetch_origin(repo_path: &str, use_wsl: bool) -> Result<(), String> {
     log::trace!("Fetching from origin in {repo_path}");
 
-    let output = create_git_command(&["fetch", "origin"], Path::new(repo_path))?
+    let output = create_git_command(&["fetch", "origin"], Path::new(repo_path), use_wsl)?
         .output()
         .map_err(|e| format!("Failed to run git fetch: {e}"))?;
 
@@ -437,11 +461,14 @@ pub fn fetch_origin(repo_path: &str) -> Result<(), String> {
 }
 
 /// Get list of remote branches for a repository (strips origin/ prefix)
-pub fn get_remote_branches(repo_path: &str) -> Result<Vec<String>, String> {
-    let output =
-        create_git_command(&["branch", "-r", "--format=%(refname:short)"], Path::new(repo_path))?
-            .output()
-            .map_err(|e| format!("Failed to run git command: {e}"))?;
+pub fn get_remote_branches(repo_path: &str, use_wsl: bool) -> Result<Vec<String>, String> {
+    let output = create_git_command(
+        &["branch", "-r", "--format=%(refname:short)"],
+        Path::new(repo_path),
+        use_wsl,
+    )?
+    .output()
+    .map_err(|e| format!("Failed to run git command: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -476,11 +503,13 @@ pub fn get_remote_branches(repo_path: &str) -> Result<Vec<String>, String> {
 /// * `worktree_path` - Path where the worktree will be created
 /// * `new_branch_name` - Name for the new branch to create
 /// * `base_branch` - Branch to base the new branch on (e.g., "main")
+/// * `use_wsl` - Whether to use WSL on Windows
 pub fn create_worktree(
     repo_path: &str,
     worktree_path: &str,
     new_branch_name: &str,
     base_branch: &str,
+    use_wsl: bool,
 ) -> Result<(), String> {
     log::trace!(
         "Creating worktree at {worktree_path} with branch {new_branch_name} from {base_branch}"
@@ -504,6 +533,7 @@ pub fn create_worktree(
             base_branch,
         ],
         Path::new(repo_path),
+        use_wsl,
     )?
     .output()
     .map_err(|e| format!("Failed to run git worktree add: {e}"))?;
@@ -523,10 +553,12 @@ pub fn create_worktree(
 /// * `repo_path` - Path to the main repository
 /// * `worktree_path` - Path where the worktree will be created
 /// * `existing_branch` - Name of the existing branch to checkout
+/// * `use_wsl` - Whether to use WSL on Windows
 pub fn create_worktree_from_existing_branch(
     repo_path: &str,
     worktree_path: &str,
     existing_branch: &str,
+    use_wsl: bool,
 ) -> Result<(), String> {
     log::trace!("Creating worktree at {worktree_path} using existing branch {existing_branch}");
 
@@ -541,6 +573,7 @@ pub fn create_worktree_from_existing_branch(
     let output = create_git_command(
         &["worktree", "add", worktree_path, existing_branch],
         Path::new(repo_path),
+        use_wsl,
     )?
     .output()
     .map_err(|e| format!("Failed to run git worktree add: {e}"))?;
@@ -561,7 +594,8 @@ pub fn create_worktree_from_existing_branch(
 /// # Arguments
 /// * `repo_path` - Path to the main repository
 /// * `worktree_path` - Path to the worktree to remove
-pub fn remove_worktree(repo_path: &str, worktree_path: &str) -> Result<(), String> {
+/// * `use_wsl` - Whether to use WSL on Windows
+pub fn remove_worktree(repo_path: &str, worktree_path: &str, use_wsl: bool) -> Result<(), String> {
     log::trace!("Removing worktree at {worktree_path}");
     log::trace!("git worktree remove {worktree_path} --force (in {repo_path})");
 
@@ -569,6 +603,7 @@ pub fn remove_worktree(repo_path: &str, worktree_path: &str) -> Result<(), Strin
     let output = create_git_command(
         &["worktree", "remove", worktree_path, "--force"],
         Path::new(repo_path),
+        use_wsl,
     )?
     .output()
     .map_err(|e| format!("Failed to run git worktree remove: {e}"))?;
@@ -593,7 +628,7 @@ pub fn remove_worktree(repo_path: &str, worktree_path: &str) -> Result<(), Strin
                 "Worktree at {worktree_path} not found or not a working tree, proceeding with cleanup"
             );
             // Try to prune stale worktrees
-            let _ = create_git_command(&["worktree", "prune"], Path::new(repo_path))
+            let _ = create_git_command(&["worktree", "prune"], Path::new(repo_path), use_wsl)
                 .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
         } else {
             return Err(format!("Failed to remove worktree: {stderr}"));
@@ -609,12 +644,13 @@ pub fn remove_worktree(repo_path: &str, worktree_path: &str) -> Result<(), Strin
 /// # Arguments
 /// * `repo_path` - Path to the main repository
 /// * `branch_name` - Name of the branch to delete
-pub fn delete_branch(repo_path: &str, branch_name: &str) -> Result<(), String> {
+/// * `use_wsl` - Whether to use WSL on Windows
+pub fn delete_branch(repo_path: &str, branch_name: &str, use_wsl: bool) -> Result<(), String> {
     log::trace!("Deleting branch {branch_name}");
     log::trace!("git branch -D {branch_name} (in {repo_path})");
 
     // git branch -D <branch>
-    let output = create_git_command(&["branch", "-D", branch_name], Path::new(repo_path))?
+    let output = create_git_command(&["branch", "-D", branch_name], Path::new(repo_path), use_wsl)?
         .output()
         .map_err(|e| format!("Failed to run git branch -D: {e}"))?;
 
@@ -641,10 +677,14 @@ pub fn delete_branch(repo_path: &str, branch_name: &str) -> Result<(), String> {
 
 /// List existing worktrees for a repository
 #[allow(dead_code)]
-pub fn list_worktrees(repo_path: &str) -> Result<Vec<String>, String> {
-    let output = create_git_command(&["worktree", "list", "--porcelain"], Path::new(repo_path))?
-        .output()
-        .map_err(|e| format!("Failed to run git worktree list: {e}"))?;
+pub fn list_worktrees(repo_path: &str, use_wsl: bool) -> Result<Vec<String>, String> {
+    let output = create_git_command(
+        &["worktree", "list", "--porcelain"],
+        Path::new(repo_path),
+        use_wsl,
+    )?
+    .output()
+    .map_err(|e| format!("Failed to run git worktree list: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -667,16 +707,22 @@ pub fn list_worktrees(repo_path: &str) -> Result<Vec<String>, String> {
 /// * `repo_path` - Path to the repository
 /// * `message` - Commit message
 /// * `stage_all` - Whether to stage all changes before committing (git add -A)
+/// * `use_wsl` - Whether to use WSL on Windows
 ///
 /// Returns the commit hash on success
-pub fn commit_changes(repo_path: &str, message: &str, stage_all: bool) -> Result<String, String> {
+pub fn commit_changes(
+    repo_path: &str,
+    message: &str,
+    stage_all: bool,
+    use_wsl: bool,
+) -> Result<String, String> {
     log::trace!("Committing changes in {repo_path}");
 
     let path_obj = Path::new(repo_path);
 
     // Optionally stage all changes
     if stage_all {
-        let add_output = create_git_command(&["add", "-A"], path_obj)?
+        let add_output = create_git_command(&["add", "-A"], path_obj, use_wsl)?
             .output()
             .map_err(|e| format!("Failed to run git add: {e}"))?;
 
@@ -687,7 +733,7 @@ pub fn commit_changes(repo_path: &str, message: &str, stage_all: bool) -> Result
     }
 
     // Check if there are any changes in the working tree
-    let status_output = create_git_command(&["status", "--porcelain"], path_obj)?
+    let status_output = create_git_command(&["status", "--porcelain"], path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to check git status: {e}"))?;
 
@@ -697,7 +743,7 @@ pub fn commit_changes(repo_path: &str, message: &str, stage_all: bool) -> Result
     }
 
     // Check if there are staged changes
-    let diff_output = create_git_command(&["diff", "--cached", "--quiet"], path_obj)?
+    let diff_output = create_git_command(&["diff", "--cached", "--quiet"], path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to check staged changes: {e}"))?;
 
@@ -710,7 +756,7 @@ pub fn commit_changes(repo_path: &str, message: &str, stage_all: bool) -> Result
     }
 
     // Commit
-    let commit_output = create_git_command(&["commit", "-m", message], path_obj)?
+    let commit_output = create_git_command(&["commit", "-m", message], path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to run git commit: {e}"))?;
 
@@ -733,7 +779,7 @@ pub fn commit_changes(repo_path: &str, message: &str, stage_all: bool) -> Result
     }
 
     // Get the commit hash
-    let hash_output = create_git_command(&["rev-parse", "HEAD"], path_obj)?
+    let hash_output = create_git_command(&["rev-parse", "HEAD"], path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to get commit hash: {e}"))?;
 
@@ -772,6 +818,7 @@ fn get_gh_install_hint() -> &'static str {
 /// * `title` - Optional PR title (if None, gh will prompt or use default)
 /// * `body` - Optional PR body
 /// * `draft` - Whether to create as draft PR
+/// * `use_wsl` - Whether to use WSL on Windows
 ///
 /// Returns the PR URL on success
 pub fn open_pull_request(
@@ -779,13 +826,14 @@ pub fn open_pull_request(
     title: Option<&str>,
     body: Option<&str>,
     draft: bool,
+    use_wsl: bool,
 ) -> Result<String, String> {
     log::trace!("Opening pull request from {repo_path}");
 
     let path_obj = Path::new(repo_path);
 
     // First check if gh is installed
-    let mut gh_check = create_gh_command(&["--version"], path_obj).map_err(|_| {
+    let mut gh_check = create_gh_command(&["--version"], path_obj, use_wsl).map_err(|_| {
         format!(
             "GitHub CLI (gh) is not installed. {}",
             get_gh_install_hint()
@@ -807,7 +855,7 @@ pub fn open_pull_request(
     }
 
     // Check if user is authenticated
-    let auth_check = create_gh_command(&["auth", "status"], path_obj)?
+    let auth_check = create_gh_command(&["auth", "status"], path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to check gh auth status: {e}"))?;
 
@@ -817,7 +865,7 @@ pub fn open_pull_request(
 
     // Push current branch to remote first
     log::trace!("Pushing current branch to remote...");
-    let push_output = create_git_command(&["push", "-u", "origin", "HEAD"], path_obj)?
+    let push_output = create_git_command(&["push", "-u", "origin", "HEAD"], path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to push to remote: {e}"))?;
 
@@ -852,7 +900,7 @@ pub fn open_pull_request(
 
     log::trace!("Running gh command with args: {:?}", args);
 
-    let output = create_gh_command(&args, path_obj)?
+    let output = create_gh_command(&args, path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to run gh pr create: {e}"))?;
 
@@ -889,8 +937,8 @@ pub struct PrContext {
 }
 
 /// Get the number of uncommitted changes (staged + unstaged)
-pub fn get_uncommitted_count(repo_path: &str) -> Result<u32, String> {
-    let output = create_git_command(&["status", "--porcelain"], Path::new(repo_path))?
+pub fn get_uncommitted_count(repo_path: &str, use_wsl: bool) -> Result<u32, String> {
+    let output = create_git_command(&["status", "--porcelain"], Path::new(repo_path), use_wsl)?
         .output()
         .map_err(|e| format!("Failed to get git status: {e}"))?;
 
@@ -900,10 +948,11 @@ pub fn get_uncommitted_count(repo_path: &str) -> Result<u32, String> {
 }
 
 /// Check if current branch has an upstream tracking branch
-pub fn has_upstream_branch(repo_path: &str) -> bool {
+pub fn has_upstream_branch(repo_path: &str, use_wsl: bool) -> bool {
     create_git_command(
         &["rev-parse", "--abbrev-ref", "@{upstream}"],
         Path::new(repo_path),
+        use_wsl,
     )
     .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()))
     .map(|o| o.status.success())
@@ -917,12 +966,16 @@ pub fn get_pr_template(repo_path: &str) -> Option<String> {
 }
 
 /// Generate the full PR context for the prompt
-pub fn generate_pr_context(repo_path: &str, target_branch: &str) -> Result<PrContext, String> {
+pub fn generate_pr_context(
+    repo_path: &str,
+    target_branch: &str,
+    use_wsl: bool,
+) -> Result<PrContext, String> {
     Ok(PrContext {
-        uncommitted_count: get_uncommitted_count(repo_path)?,
-        current_branch: get_current_branch(repo_path)?,
+        uncommitted_count: get_uncommitted_count(repo_path, use_wsl)?,
+        current_branch: get_current_branch(repo_path, use_wsl)?,
         target_branch: target_branch.to_string(),
-        has_upstream: has_upstream_branch(repo_path),
+        has_upstream: has_upstream_branch(repo_path, use_wsl),
         pr_template: get_pr_template(repo_path),
     })
 }
@@ -1003,8 +1056,8 @@ pub fn run_setup_script(
 }
 
 /// Check if there are uncommitted changes (staged or unstaged)
-pub fn has_uncommitted_changes(repo_path: &str) -> bool {
-    create_git_command(&["status", "--porcelain"], Path::new(repo_path))
+pub fn has_uncommitted_changes(repo_path: &str, use_wsl: bool) -> bool {
+    create_git_command(&["status", "--porcelain"], Path::new(repo_path), use_wsl)
         .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()))
         .map(|o| {
             if o.status.success() {
@@ -1029,18 +1082,19 @@ pub fn rebase_onto_base(
     repo_path: &str,
     base_branch: &str,
     commit_message: Option<&str>,
+    use_wsl: bool,
 ) -> Result<String, String> {
     log::trace!("Starting rebase onto {base_branch} in {repo_path}");
 
     let path_obj = Path::new(repo_path);
 
     // Step 1: Check for uncommitted changes and commit if needed
-    if has_uncommitted_changes(repo_path) {
+    if has_uncommitted_changes(repo_path, use_wsl) {
         let message = commit_message.unwrap_or("WIP: Committing changes before rebase");
         log::trace!("Committing uncommitted changes: {message}");
 
         // Stage all changes
-        let add_output = create_git_command(&["add", "-A"], path_obj)?
+        let add_output = create_git_command(&["add", "-A"], path_obj, use_wsl)?
             .output()
             .map_err(|e| format!("Failed to stage changes: {e}"))?;
 
@@ -1050,7 +1104,7 @@ pub fn rebase_onto_base(
         }
 
         // Commit
-        let commit_output = create_git_command(&["commit", "-m", message], path_obj)?
+        let commit_output = create_git_command(&["commit", "-m", message], path_obj, use_wsl)?
             .output()
             .map_err(|e| format!("Failed to commit changes: {e}"))?;
 
@@ -1065,7 +1119,7 @@ pub fn rebase_onto_base(
 
     // Step 2: Fetch from origin
     log::trace!("Fetching from origin...");
-    let fetch_output = create_git_command(&["fetch", "origin", base_branch], path_obj)?
+    let fetch_output = create_git_command(&["fetch", "origin", base_branch], path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to fetch from origin: {e}"))?;
 
@@ -1077,14 +1131,14 @@ pub fn rebase_onto_base(
     // Step 3: Rebase onto origin/{base_branch}
     log::trace!("Rebasing onto origin/{base_branch}...");
     let rebase_target = format!("origin/{base_branch}");
-    let rebase_output = create_git_command(&["rebase", &rebase_target], path_obj)?
+    let rebase_output = create_git_command(&["rebase", &rebase_target], path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to rebase: {e}"))?;
 
     if !rebase_output.status.success() {
         let stderr = String::from_utf8_lossy(&rebase_output.stderr);
         // Abort the rebase if it fails
-        let _ = create_git_command(&["rebase", "--abort"], path_obj)
+        let _ = create_git_command(&["rebase", "--abort"], path_obj, use_wsl)
             .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
         return Err(format!(
             "Rebase failed (conflicts likely). Rebase has been aborted.\n{stderr}"
@@ -1093,7 +1147,7 @@ pub fn rebase_onto_base(
 
     // Step 4: Force push with lease
     log::trace!("Force pushing with lease...");
-    let push_output = create_git_command(&["push", "--force-with-lease"], path_obj)?
+    let push_output = create_git_command(&["push", "--force-with-lease"], path_obj, use_wsl)?
         .output()
         .map_err(|e| format!("Failed to push: {e}"))?;
 
@@ -1102,9 +1156,10 @@ pub fn rebase_onto_base(
         // Check if branch doesn't have upstream yet
         if stderr.contains("has no upstream branch") {
             // Try regular push with -u
-            let push_u_output = create_git_command(&["push", "-u", "origin", "HEAD"], path_obj)?
-                .output()
-                .map_err(|e| format!("Failed to push: {e}"))?;
+            let push_u_output =
+                create_git_command(&["push", "-u", "origin", "HEAD"], path_obj, use_wsl)?
+                    .output()
+                    .map_err(|e| format!("Failed to push: {e}"))?;
 
             if !push_u_output.status.success() {
                 let stderr = String::from_utf8_lossy(&push_u_output.stderr);
@@ -1158,19 +1213,21 @@ pub enum MergeResult {
 /// * `feature_branch` - Name of the feature branch to merge
 /// * `base_branch` - Name of the base branch to merge into
 /// * `merge_type` - Type of merge operation to perform
+/// * `use_wsl` - Whether to use WSL on Windows
 pub fn merge_branch_to_base(
     repo_path: &str,
     worktree_path: &str,
     feature_branch: &str,
     base_branch: &str,
     merge_type: MergeType,
+    use_wsl: bool,
 ) -> MergeResult {
     log::trace!(
         "Merging {feature_branch} into {base_branch} in {repo_path} (type: {merge_type:?})"
     );
 
     // Step 1: Check for uncommitted changes in main repo - refuse to merge if any
-    if has_uncommitted_changes(repo_path) {
+    if has_uncommitted_changes(repo_path, use_wsl) {
         return MergeResult::Error {
             message: "Cannot merge: there are uncommitted changes in the base branch. Please commit or stash them first.".to_string(),
         };
@@ -1180,7 +1237,7 @@ pub fn merge_branch_to_base(
 
     // Step 2: Checkout base branch
     log::trace!("Checking out {base_branch}...");
-    let checkout_output = create_git_command(&["checkout", base_branch], path_obj)
+    let checkout_output = create_git_command(&["checkout", base_branch], path_obj, use_wsl)
         .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
     match checkout_output {
@@ -1200,7 +1257,7 @@ pub fn merge_branch_to_base(
 
     // Step 3: Pull from origin (best effort - don't fail if no remote)
     log::trace!("Pulling latest from origin...");
-    let pull_output = create_git_command(&["pull", "origin", base_branch], path_obj)
+    let pull_output = create_git_command(&["pull", "origin", base_branch], path_obj, use_wsl)
         .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
     if let Ok(output) = &pull_output {
@@ -1220,18 +1277,18 @@ pub fn merge_branch_to_base(
     match merge_type {
         MergeType::Rebase => {
             // Rebase workflow: rebase in worktree, then fast-forward merge in main repo
-            rebase_and_merge(repo_path, worktree_path, feature_branch, base_branch)
+            rebase_and_merge(repo_path, worktree_path, feature_branch, base_branch, use_wsl)
         }
         MergeType::Merge | MergeType::Squash => {
             // Standard merge or squash workflow
             let squash = merge_type == MergeType::Squash;
-            perform_merge(repo_path, feature_branch, squash)
+            perform_merge(repo_path, feature_branch, squash, use_wsl)
         }
     }
 }
 
 /// Helper function to perform a standard merge or squash merge
-fn perform_merge(repo_path: &str, feature_branch: &str, squash: bool) -> MergeResult {
+fn perform_merge(repo_path: &str, feature_branch: &str, squash: bool, use_wsl: bool) -> MergeResult {
     log::trace!(
         "Performing {} merge...",
         if squash { "squash" } else { "standard" }
@@ -1246,13 +1303,14 @@ fn perform_merge(repo_path: &str, feature_branch: &str, squash: bool) -> MergeRe
 
     let merge_output = if squash {
         // --squash stages all changes but doesn't commit
-        create_git_command(&["merge", "--squash", feature_branch], path_obj)
+        create_git_command(&["merge", "--squash", feature_branch], path_obj, use_wsl)
             .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()))
     } else {
         // --no-ff creates a merge commit preserving history
         create_git_command(
             &["merge", "--no-ff", feature_branch, "-m", &merge_message],
             path_obj,
+            use_wsl,
         )
         .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()))
     };
@@ -1263,7 +1321,7 @@ fn perform_merge(repo_path: &str, feature_branch: &str, squash: bool) -> MergeRe
                 // For squash merges, we need to commit the staged changes
                 if squash {
                     let commit_output =
-                        create_git_command(&["commit", "-m", &merge_message], path_obj)
+                        create_git_command(&["commit", "-m", &merge_message], path_obj, use_wsl)
                             .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
                     match commit_output {
@@ -1288,9 +1346,9 @@ fn perform_merge(repo_path: &str, feature_branch: &str, squash: bool) -> MergeRe
                     }
                 }
 
-                get_head_commit_hash(repo_path)
+                get_head_commit_hash(repo_path, use_wsl)
             } else {
-                handle_merge_failure(repo_path, &output.stdout, &output.stderr)
+                handle_merge_failure(repo_path, &output.stdout, &output.stderr, use_wsl)
             }
         }
         Err(e) => MergeResult::Error {
@@ -1308,6 +1366,7 @@ fn rebase_and_merge(
     worktree_path: &str,
     feature_branch: &str,
     base_branch: &str,
+    use_wsl: bool,
 ) -> MergeResult {
     log::trace!("Rebasing {feature_branch} onto {base_branch} in worktree {worktree_path}...");
 
@@ -1315,7 +1374,7 @@ fn rebase_and_merge(
     let repo_path_obj = Path::new(repo_path);
 
     // Step 1: Rebase in worktree (feature branch is already checked out there)
-    let rebase_output = create_git_command(&["rebase", base_branch], worktree_path_obj)
+    let rebase_output = create_git_command(&["rebase", base_branch], worktree_path_obj, use_wsl)
         .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
     match rebase_output {
@@ -1334,6 +1393,7 @@ fn rebase_and_merge(
                     let conflict_output = create_git_command(
                         &["diff", "--name-only", "--diff-filter=U"],
                         worktree_path_obj,
+                        use_wsl,
                     )
                     .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
@@ -1348,7 +1408,7 @@ fn rebase_and_merge(
                         .unwrap_or_default();
 
                     // Get the diff with conflict markers
-                    let diff_output = create_git_command(&["diff"], worktree_path_obj)
+                    let diff_output = create_git_command(&["diff"], worktree_path_obj, use_wsl)
                         .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
                     let conflict_diff = diff_output
@@ -1360,7 +1420,7 @@ fn rebase_and_merge(
                         "Rebase has conflicts in {} files, aborting...",
                         conflicting_files.len()
                     );
-                    let _ = create_git_command(&["rebase", "--abort"], worktree_path_obj)
+                    let _ = create_git_command(&["rebase", "--abort"], worktree_path_obj, use_wsl)
                         .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
                     return MergeResult::Conflict {
@@ -1369,7 +1429,7 @@ fn rebase_and_merge(
                     };
                 } else {
                     // Abort any partial rebase state
-                    let _ = create_git_command(&["rebase", "--abort"], worktree_path_obj)
+                    let _ = create_git_command(&["rebase", "--abort"], worktree_path_obj, use_wsl)
                         .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
                     let error_detail = if !stderr.trim().is_empty() {
@@ -1396,13 +1456,14 @@ fn rebase_and_merge(
     // Step 2: Fast-forward merge in main repo (base branch already checked out by caller)
     log::trace!("Rebase successful, fast-forward merging into {base_branch}...");
 
-    let ff_merge = create_git_command(&["merge", "--ff-only", feature_branch], repo_path_obj)
-        .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
+    let ff_merge =
+        create_git_command(&["merge", "--ff-only", feature_branch], repo_path_obj, use_wsl)
+            .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
     match ff_merge {
         Ok(output) => {
             if output.status.success() {
-                get_head_commit_hash(repo_path)
+                get_head_commit_hash(repo_path, use_wsl)
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 MergeResult::Error {
@@ -1417,8 +1478,8 @@ fn rebase_and_merge(
 }
 
 /// Helper function to get the current HEAD commit hash
-fn get_head_commit_hash(repo_path: &str) -> MergeResult {
-    let hash_output = create_git_command(&["rev-parse", "HEAD"], Path::new(repo_path))
+fn get_head_commit_hash(repo_path: &str, use_wsl: bool) -> MergeResult {
+    let hash_output = create_git_command(&["rev-parse", "HEAD"], Path::new(repo_path), use_wsl)
         .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
     let commit_hash = hash_output
@@ -1430,7 +1491,7 @@ fn get_head_commit_hash(repo_path: &str) -> MergeResult {
 }
 
 /// Helper function to handle merge failures and extract conflict info
-fn handle_merge_failure(repo_path: &str, stdout: &[u8], stderr: &[u8]) -> MergeResult {
+fn handle_merge_failure(repo_path: &str, stdout: &[u8], stderr: &[u8], use_wsl: bool) -> MergeResult {
     let stdout_str = String::from_utf8_lossy(stdout);
     let stderr_str = String::from_utf8_lossy(stderr);
     let combined = format!("{stdout_str}\n{stderr_str}");
@@ -1443,7 +1504,7 @@ fn handle_merge_failure(repo_path: &str, stdout: &[u8], stderr: &[u8]) -> MergeR
     {
         // Get list of conflicting files
         let conflict_output =
-            create_git_command(&["diff", "--name-only", "--diff-filter=U"], path_obj)
+            create_git_command(&["diff", "--name-only", "--diff-filter=U"], path_obj, use_wsl)
                 .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
         let conflicting_files: Vec<String> = conflict_output
@@ -1457,7 +1518,7 @@ fn handle_merge_failure(repo_path: &str, stdout: &[u8], stderr: &[u8]) -> MergeR
             .unwrap_or_default();
 
         // Get the diff with conflict markers BEFORE aborting
-        let diff_output = create_git_command(&["diff"], path_obj)
+        let diff_output = create_git_command(&["diff"], path_obj, use_wsl)
             .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
         let conflict_diff = diff_output
@@ -1469,7 +1530,7 @@ fn handle_merge_failure(repo_path: &str, stdout: &[u8], stderr: &[u8]) -> MergeR
             "Merge has conflicts in {} files, aborting...",
             conflicting_files.len()
         );
-        let _ = create_git_command(&["merge", "--abort"], path_obj)
+        let _ = create_git_command(&["merge", "--abort"], path_obj, use_wsl)
             .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
         MergeResult::Conflict {
@@ -1478,7 +1539,7 @@ fn handle_merge_failure(repo_path: &str, stdout: &[u8], stderr: &[u8]) -> MergeR
         }
     } else {
         // Abort any partial merge state
-        let _ = create_git_command(&["merge", "--abort"], path_obj)
+        let _ = create_git_command(&["merge", "--abort"], path_obj, use_wsl)
             .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
         // Create a human-friendly error message

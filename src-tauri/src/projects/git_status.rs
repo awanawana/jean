@@ -15,6 +15,8 @@ pub struct ActiveWorktreeInfo {
     pub pr_number: Option<u32>,
     /// GitHub PR URL (if a PR has been created)
     pub pr_url: Option<String>,
+    /// Whether to use WSL on Windows (ignored on other platforms)
+    pub use_wsl: bool,
 }
 
 /// Git branch status relative to a base branch
@@ -42,10 +44,10 @@ pub struct GitBranchStatus {
 }
 
 /// Fetch the latest changes from origin for a specific branch
-fn fetch_origin_branch(repo_path: &str, branch: &str) -> Result<(), String> {
+fn fetch_origin_branch(repo_path: &str, branch: &str, use_wsl: bool) -> Result<(), String> {
     log::trace!("Fetching origin/{branch} in {repo_path}");
 
-    let output = create_git_command(&["fetch", "origin", branch], Path::new(repo_path))?
+    let output = create_git_command(&["fetch", "origin", branch], Path::new(repo_path), use_wsl)?
         .output()
         .map_err(|e| format!("Failed to run git fetch: {e}"))?;
 
@@ -67,8 +69,8 @@ fn fetch_origin_branch(repo_path: &str, branch: &str) -> Result<(), String> {
 }
 
 /// Get the current branch name
-fn get_current_branch(repo_path: &str) -> Result<String, String> {
-    let output = create_git_command(&["rev-parse", "--abbrev-ref", "HEAD"], Path::new(repo_path))?
+fn get_current_branch(repo_path: &str, use_wsl: bool) -> Result<String, String> {
+    let output = create_git_command(&["rev-parse", "--abbrev-ref", "HEAD"], Path::new(repo_path), use_wsl)?
         .output()
         .map_err(|e| format!("Failed to run git command: {e}"))?;
 
@@ -83,13 +85,13 @@ fn get_current_branch(repo_path: &str) -> Result<String, String> {
 
 /// Get the number of lines added and removed in uncommitted changes (working directory)
 /// This includes tracked file modifications (staged + unstaged) AND untracked (new) files
-fn get_uncommitted_diff_stats(repo_path: &str) -> (u32, u32) {
+fn get_uncommitted_diff_stats(repo_path: &str, use_wsl: bool) -> (u32, u32) {
     let mut added = 0u32;
     let mut removed = 0u32;
 
     // 1. Get diff stats for unstaged changes (working directory vs index)
     // git diff --numstat outputs: "added<tab>removed<tab>filename" per line
-    let unstaged_output = create_git_command(&["diff", "--numstat"], Path::new(repo_path))
+    let unstaged_output = create_git_command(&["diff", "--numstat"], Path::new(repo_path), use_wsl)
         .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
     if let Ok(o) = unstaged_output {
@@ -108,7 +110,7 @@ fn get_uncommitted_diff_stats(repo_path: &str) -> (u32, u32) {
 
     // 2. Get diff stats for staged changes (index vs HEAD)
     // git diff --cached --numstat shows changes that have been `git add`ed
-    let staged_output = create_git_command(&["diff", "--cached", "--numstat"], Path::new(repo_path))
+    let staged_output = create_git_command(&["diff", "--cached", "--numstat"], Path::new(repo_path), use_wsl)
         .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
     if let Ok(o) = staged_output {
@@ -127,7 +129,7 @@ fn get_uncommitted_diff_stats(repo_path: &str) -> (u32, u32) {
 
     // 3. Get stats for untracked (new) files
     // List all untracked files
-    let untracked_output = create_git_command(&["ls-files", "--others", "--exclude-standard"], Path::new(repo_path))
+    let untracked_output = create_git_command(&["ls-files", "--others", "--exclude-standard"], Path::new(repo_path), use_wsl)
         .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
     if let Ok(o) = untracked_output {
@@ -156,11 +158,11 @@ fn get_uncommitted_diff_stats(repo_path: &str) -> (u32, u32) {
 
 /// Generate raw patch format for untracked files
 /// Returns a string in unified diff format
-fn get_untracked_files_raw_patch(repo_path: &str) -> String {
+fn get_untracked_files_raw_patch(repo_path: &str, use_wsl: bool) -> String {
     let mut raw_patch = String::new();
 
     // List all untracked files
-    let output = create_git_command(&["ls-files", "--others", "--exclude-standard"], Path::new(repo_path))
+    let output = create_git_command(&["ls-files", "--others", "--exclude-standard"], Path::new(repo_path), use_wsl)
         .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
     let Ok(o) = output else {
@@ -204,11 +206,11 @@ fn get_untracked_files_raw_patch(repo_path: &str) -> String {
 
 /// Get detailed diff information for untracked (new) files
 /// Returns a Vec of DiffFile entries for each untracked file
-fn get_untracked_files_diff(repo_path: &str) -> Vec<DiffFile> {
+fn get_untracked_files_diff(repo_path: &str, use_wsl: bool) -> Vec<DiffFile> {
     let mut untracked_files: Vec<DiffFile> = Vec::new();
 
     // List all untracked files
-    let output = create_git_command(&["ls-files", "--others", "--exclude-standard"], Path::new(repo_path))
+    let output = create_git_command(&["ls-files", "--others", "--exclude-standard"], Path::new(repo_path), use_wsl)
         .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
     let Ok(o) = output else {
@@ -284,11 +286,11 @@ fn get_untracked_files_diff(repo_path: &str) -> Vec<DiffFile> {
 }
 
 /// Get the number of lines added and removed compared to base branch (origin/main)
-fn get_branch_diff_stats(repo_path: &str, base_branch: &str) -> (u32, u32) {
+fn get_branch_diff_stats(repo_path: &str, base_branch: &str, use_wsl: bool) -> (u32, u32) {
     // git diff --numstat origin/main...HEAD shows changes in current branch vs base
     let origin_ref = format!("origin/{base_branch}");
     let diff_range = format!("{origin_ref}...HEAD");
-    let output = create_git_command(&["diff", "--numstat", &diff_range], Path::new(repo_path))
+    let output = create_git_command(&["diff", "--numstat", &diff_range], Path::new(repo_path), use_wsl)
         .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
     match output {
@@ -312,9 +314,9 @@ fn get_branch_diff_stats(repo_path: &str, base_branch: &str) -> (u32, u32) {
 
 /// Count commits between two refs
 /// Returns 0 if either ref doesn't exist
-fn count_commits_between(repo_path: &str, from_ref: &str, to_ref: &str) -> u32 {
+fn count_commits_between(repo_path: &str, from_ref: &str, to_ref: &str, use_wsl: bool) -> u32 {
     let range = format!("{from_ref}..{to_ref}");
-    let output = create_git_command(&["rev-list", "--count", &range], Path::new(repo_path))
+    let output = create_git_command(&["rev-list", "--count", &range], Path::new(repo_path), use_wsl)
         .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
     match output {
@@ -430,6 +432,7 @@ pub fn get_git_diff(
     repo_path: &str,
     diff_type: &str,
     base_branch: Option<&str>,
+    use_wsl: bool,
 ) -> Result<GitDiff, String> {
     let base = base_branch.unwrap_or("main");
     let range = format!("origin/{base}...HEAD");
@@ -451,7 +454,7 @@ pub fn get_git_diff(
         _ => return Err(format!("Invalid diff_type: {diff_type}")),
     };
 
-    let output = create_git_command(&args, Path::new(repo_path))?
+    let output = create_git_command(&args, Path::new(repo_path), use_wsl)?
         .output()
         .map_err(|e| format!("Failed to run git diff: {e}"))?;
 
@@ -594,11 +597,11 @@ pub fn get_git_diff(
 
     // For uncommitted diffs, also include untracked (new) files
     if diff_type == "uncommitted" {
-        let untracked_files = get_untracked_files_diff(repo_path);
+        let untracked_files = get_untracked_files_diff(repo_path, use_wsl);
         files.extend(untracked_files);
 
         // Add raw patch for untracked files
-        let untracked_patch = get_untracked_files_raw_patch(repo_path);
+        let untracked_patch = get_untracked_files_raw_patch(repo_path, use_wsl);
         if !untracked_patch.is_empty() {
             raw_patch.push_str(&untracked_patch);
         }
@@ -630,33 +633,34 @@ pub fn get_git_diff(
 pub fn get_branch_status(info: &ActiveWorktreeInfo) -> Result<GitBranchStatus, String> {
     let repo_path = &info.worktree_path;
     let base_branch = &info.base_branch;
+    let use_wsl = info.use_wsl;
 
     // Fetch latest from origin for the base branch
     // This is best-effort; if it fails, we'll compare with stale data
-    let _ = fetch_origin_branch(repo_path, base_branch);
+    let _ = fetch_origin_branch(repo_path, base_branch, use_wsl);
 
     // Get current branch name
-    let current_branch = get_current_branch(repo_path)?;
+    let current_branch = get_current_branch(repo_path, use_wsl)?;
 
     // Compare HEAD to origin/{base_branch}
     let origin_ref = format!("origin/{base_branch}");
 
     // Commits we're behind (commits in origin/base that aren't in HEAD)
-    let behind_count = count_commits_between(repo_path, "HEAD", &origin_ref);
+    let behind_count = count_commits_between(repo_path, "HEAD", &origin_ref, use_wsl);
 
     // Commits we're ahead (commits in HEAD that aren't in origin/base)
-    let ahead_count = count_commits_between(repo_path, &origin_ref, "HEAD");
+    let ahead_count = count_commits_between(repo_path, &origin_ref, "HEAD", use_wsl);
 
     // Get uncommitted diff stats (working directory changes)
-    let (uncommitted_added, uncommitted_removed) = get_uncommitted_diff_stats(repo_path);
+    let (uncommitted_added, uncommitted_removed) = get_uncommitted_diff_stats(repo_path, use_wsl);
 
     // Get branch diff stats (changes compared to base branch)
-    let (branch_diff_added, branch_diff_removed) = get_branch_diff_stats(repo_path, base_branch);
+    let (branch_diff_added, branch_diff_removed) = get_branch_diff_stats(repo_path, base_branch, use_wsl);
 
     // Base branch's own remote sync status
     // Compare local base branch to origin/base_branch
-    let base_branch_ahead_count = count_commits_between(repo_path, &origin_ref, base_branch);
-    let base_branch_behind_count = count_commits_between(repo_path, base_branch, &origin_ref);
+    let base_branch_ahead_count = count_commits_between(repo_path, &origin_ref, base_branch, use_wsl);
+    let base_branch_behind_count = count_commits_between(repo_path, base_branch, &origin_ref, use_wsl);
 
     // Get current timestamp
     let checked_at = SystemTime::now()

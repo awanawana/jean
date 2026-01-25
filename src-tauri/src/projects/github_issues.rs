@@ -75,11 +75,13 @@ pub struct IssueContext {
 /// - Returns up to 100 issues sorted by creation date (newest first)
 #[tauri::command]
 pub async fn list_github_issues(
+    app: tauri::AppHandle,
     project_path: String,
     state: Option<String>,
 ) -> Result<Vec<GitHubIssue>, String> {
     log::trace!("Listing GitHub issues for {project_path} with state: {state:?}");
 
+    let use_wsl = crate::projects::commands::get_use_wsl_preference(&app).await;
     let state_arg = state.unwrap_or_else(|| "open".to_string());
 
     // Run gh issue list
@@ -95,6 +97,7 @@ pub async fn list_github_issues(
             &state_arg,
         ],
         Path::new(&project_path),
+        use_wsl,
     )?
     .output()
     .map_err(|e| format!("Failed to run gh issue list: {e}"))?;
@@ -127,10 +130,13 @@ pub async fn list_github_issues(
 /// Uses `gh issue view` to fetch the issue with comments.
 #[tauri::command]
 pub async fn get_github_issue(
+    app: tauri::AppHandle,
     project_path: String,
     issue_number: u32,
 ) -> Result<GitHubIssueDetail, String> {
     log::trace!("Getting GitHub issue #{issue_number} for {project_path}");
+
+    let use_wsl = crate::projects::commands::get_use_wsl_preference(&app).await;
 
     // Run gh issue view
     let issue_num_str = issue_number.to_string();
@@ -143,6 +149,7 @@ pub async fn get_github_issue(
             "number,title,body,state,labels,createdAt,author,comments",
         ],
         Path::new(&project_path),
+        use_wsl,
     )?
     .output()
     .map_err(|e| format!("Failed to run gh issue view: {e}"))?;
@@ -595,12 +602,14 @@ pub async fn load_issue_context(
 ) -> Result<LoadedIssueContext, String> {
     log::trace!("Loading issue #{issue_number} context for worktree {worktree_id}");
 
+    let use_wsl = crate::projects::commands::get_use_wsl_preference(&app).await;
+
     // Get repo identifier for shared storage
-    let repo_id = get_repo_identifier(&project_path)?;
+    let repo_id = get_repo_identifier(&project_path, use_wsl)?;
     let repo_key = repo_id.to_key();
 
     // Fetch issue data from GitHub
-    let issue = get_github_issue(project_path, issue_number).await?;
+    let issue = get_github_issue(app.clone(), project_path, issue_number).await?;
 
     // Create issue context
     let ctx = IssueContext {
@@ -729,8 +738,10 @@ pub async fn remove_issue_context(
 ) -> Result<(), String> {
     log::trace!("Removing issue #{issue_number} context for worktree {worktree_id}");
 
+    let use_wsl = crate::projects::commands::get_use_wsl_preference(&app).await;
+
     // Get repo identifier
-    let repo_id = get_repo_identifier(&project_path)?;
+    let repo_id = get_repo_identifier(&project_path, use_wsl)?;
     let repo_key = repo_id.to_key();
 
     // Remove reference
@@ -837,11 +848,13 @@ pub struct LoadedPullRequestContext {
 /// - Returns up to 100 PRs sorted by creation date (newest first)
 #[tauri::command]
 pub async fn list_github_prs(
+    app: tauri::AppHandle,
     project_path: String,
     state: Option<String>,
 ) -> Result<Vec<GitHubPullRequest>, String> {
     log::trace!("Listing GitHub PRs for {project_path} with state: {state:?}");
 
+    let use_wsl = crate::projects::commands::get_use_wsl_preference(&app).await;
     let state_arg = state.unwrap_or_else(|| "open".to_string());
 
     // Run gh pr list
@@ -857,6 +870,7 @@ pub async fn list_github_prs(
             &state_arg,
         ],
         Path::new(&project_path),
+        use_wsl,
     )?
     .output()
     .map_err(|e| format!("Failed to run gh pr list: {e}"))?;
@@ -888,10 +902,13 @@ pub async fn list_github_prs(
 /// Uses `gh pr view` to fetch the PR with comments and reviews.
 #[tauri::command]
 pub async fn get_github_pr(
+    app: tauri::AppHandle,
     project_path: String,
     pr_number: u32,
 ) -> Result<GitHubPullRequestDetail, String> {
     log::trace!("Getting GitHub PR #{pr_number} for {project_path}");
+
+    let use_wsl = crate::projects::commands::get_use_wsl_preference(&app).await;
 
     // Run gh pr view
     let pr_num_str = pr_number.to_string();
@@ -904,6 +921,7 @@ pub async fn get_github_pr(
             "number,title,body,state,headRefName,baseRefName,isDraft,createdAt,author,labels,comments,reviews",
         ],
         Path::new(&project_path),
+        use_wsl,
     )?
     .output()
     .map_err(|e| format!("Failed to run gh pr view: {e}"))?;
@@ -1012,13 +1030,14 @@ pub fn format_pr_context_markdown(ctx: &PullRequestContext) -> String {
 /// Get the diff for a PR using `gh pr diff`
 ///
 /// Returns the diff as a string, truncated to 100KB if too large.
-pub fn get_pr_diff(project_path: &str, pr_number: u32) -> Result<String, String> {
+pub fn get_pr_diff(project_path: &str, pr_number: u32, use_wsl: bool) -> Result<String, String> {
     log::debug!("Fetching diff for PR #{pr_number} in {project_path}");
 
     let pr_num_str = pr_number.to_string();
     let output = crate::gh_cli::create_gh_command(
         &["pr", "diff", &pr_num_str, "--color", "never"],
         Path::new(project_path),
+        use_wsl,
     )?
     .output()
     .map_err(|e| format!("Failed to run gh pr diff: {e}"))?;
@@ -1060,15 +1079,17 @@ pub async fn load_pr_context(
 ) -> Result<LoadedPullRequestContext, String> {
     log::trace!("Loading PR #{pr_number} context for worktree {worktree_id}");
 
+    let use_wsl = crate::projects::commands::get_use_wsl_preference(&app).await;
+
     // Get repo identifier for shared storage
-    let repo_id = get_repo_identifier(&project_path)?;
+    let repo_id = get_repo_identifier(&project_path, use_wsl)?;
     let repo_key = repo_id.to_key();
 
     // Fetch PR data from GitHub
-    let pr = get_github_pr(project_path.clone(), pr_number).await?;
+    let pr = get_github_pr(app.clone(), project_path.clone(), pr_number).await?;
 
     // Fetch the diff
-    let diff = get_pr_diff(&project_path, pr_number).ok();
+    let diff = get_pr_diff(&project_path, pr_number, use_wsl).ok();
 
     // Create PR context
     let ctx = PullRequestContext {
@@ -1211,8 +1232,10 @@ pub async fn remove_pr_context(
 ) -> Result<(), String> {
     log::trace!("Removing PR #{pr_number} context for worktree {worktree_id}");
 
+    let use_wsl = crate::projects::commands::get_use_wsl_preference(&app).await;
+
     // Get repo identifier
-    let repo_id = get_repo_identifier(&project_path)?;
+    let repo_id = get_repo_identifier(&project_path, use_wsl)?;
     let repo_key = repo_id.to_key();
 
     // Remove reference
@@ -1243,7 +1266,8 @@ pub async fn get_issue_context_content(
     project_path: String,
 ) -> Result<String, String> {
     // Get repo identifier
-    let repo_id = get_repo_identifier(&project_path)?;
+    let use_wsl = crate::projects::commands::get_use_wsl_preference(&app).await;
+    let repo_id = get_repo_identifier(&project_path, use_wsl)?;
     let repo_key = repo_id.to_key();
 
     // Verify this worktree has a reference to this context
@@ -1277,7 +1301,8 @@ pub async fn get_pr_context_content(
     project_path: String,
 ) -> Result<String, String> {
     // Get repo identifier
-    let repo_id = get_repo_identifier(&project_path)?;
+    let use_wsl = crate::projects::commands::get_use_wsl_preference(&app).await;
+    let repo_id = get_repo_identifier(&project_path, use_wsl)?;
     let repo_key = repo_id.to_key();
 
     // Verify this worktree has a reference to this context
