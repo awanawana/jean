@@ -3,8 +3,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager};
+
+#[cfg(target_os = "macos")]
+use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 
 mod background_tasks;
 mod chat;
@@ -118,6 +120,8 @@ pub struct AppPreferences {
     pub parallel_execution_prompt_enabled: bool, // Add system prompt to encourage parallel sub-agent execution
     #[serde(default)]
     pub magic_prompts: MagicPrompts, // Customizable prompts for AI-powered features
+    #[serde(default)]
+    pub magic_prompt_models: MagicPromptModels, // Per-prompt model overrides
     #[serde(default = "default_file_edit_mode")]
     pub file_edit_mode: String, // How to edit files: inline (CodeMirror) or external (VS Code, etc.)
     #[serde(default = "default_use_wsl")]
@@ -267,6 +271,8 @@ pub struct MagicPrompts {
     pub code_review: String,
     #[serde(default = "default_context_summary_prompt")]
     pub context_summary: String,
+    #[serde(default = "default_resolve_conflicts_prompt")]
+    pub resolve_conflicts: String,
 }
 
 fn default_investigate_issue_prompt() -> String {
@@ -430,6 +436,47 @@ Format as clean markdown. Be concise but capture reasoning.
         .to_string()
 }
 
+fn default_resolve_conflicts_prompt() -> String {
+    r#"Please help me resolve these conflicts. Analyze the diff above, explain what's conflicting in each file, and guide me through resolving each conflict.
+
+After resolving each file's conflicts, stage it with `git add`. Then run the appropriate continue command (`git rebase --continue`, `git merge --continue`, or `git cherry-pick --continue`). If more conflicts appear, resolve those too. Keep going until the operation is fully complete and the branch is ready to push."#
+        .to_string()
+}
+
+/// Per-prompt model overrides for magic prompts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MagicPromptModels {
+    #[serde(default = "default_model")]
+    pub investigate_model: String,
+    #[serde(default = "default_haiku_model")]
+    pub pr_content_model: String,
+    #[serde(default = "default_haiku_model")]
+    pub commit_message_model: String,
+    #[serde(default = "default_haiku_model")]
+    pub code_review_model: String,
+    #[serde(default = "default_model")]
+    pub context_summary_model: String,
+    #[serde(default = "default_model")]
+    pub resolve_conflicts_model: String,
+}
+
+fn default_haiku_model() -> String {
+    "haiku".to_string()
+}
+
+impl Default for MagicPromptModels {
+    fn default() -> Self {
+        Self {
+            investigate_model: default_model(),
+            pr_content_model: default_haiku_model(),
+            commit_message_model: default_haiku_model(),
+            code_review_model: default_haiku_model(),
+            context_summary_model: default_model(),
+            resolve_conflicts_model: default_model(),
+        }
+    }
+}
+
 impl Default for MagicPrompts {
     fn default() -> Self {
         Self {
@@ -439,6 +486,7 @@ impl Default for MagicPrompts {
             commit_message: default_commit_message_prompt(),
             code_review: default_code_review_prompt(),
             context_summary: default_context_summary_prompt(),
+            resolve_conflicts: default_resolve_conflicts_prompt(),
         }
     }
 }
@@ -471,6 +519,7 @@ impl Default for AppPreferences {
             session_recap_model: default_session_recap_model(),
             parallel_execution_prompt_enabled: default_parallel_execution_prompt_enabled(),
             magic_prompts: MagicPrompts::default(),
+            magic_prompt_models: MagicPromptModels::default(),
             file_edit_mode: default_file_edit_mode(),
             use_wsl: default_use_wsl(),
             ai_language: String::new(),
@@ -908,6 +957,7 @@ async fn cleanup_old_recovery_files(app: AppHandle) -> Result<u32, String> {
     Ok(removed_count)
 }
 
+#[cfg(target_os = "macos")]
 // Create the native menu system
 fn create_app_menu(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     log::trace!("Setting up native menu system");
@@ -1013,6 +1063,48 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     fix_macos_path();
 
+    // FIX: Avoid WebKit GBM buffer errors on Linux (especially NVIDIA)
+    //
+    // This issue occurs when using transparent windows with WebKitGTK on Linux,
+    // particularly with NVIDIA GPUs. The error "Failed to create GBM buffer of size NxN: Invalid argument"
+    // is caused by incompatibilities between hardware-accelerated compositing and certain
+    // GPU drivers/compositors.
+    //
+    // Related issues:
+    // - https://github.com/tauri-apps/tauri/issues/13493
+    // - https://github.com/tauri-apps/tauri/issues/8254
+    // - https://bugs.webkit.org/show_bug.cgi?id=165246
+    // - https://github.com/tauri-apps/tauri/issues/9394 (NVIDIA problems doc)
+    //
+    // The fix disables problematic GPU compositing modes. Users can override via env vars:
+    // - JEAN_FORCE_X11=1 to force X11 backend (default: no)
+    // - WEBKIT_DISABLE_COMPOSITING_MODE=0 to re-enable GPU compositing (risky)
+    #[cfg(target_os = "linux")]
+    {
+        log::trace!("Setting WebKit compatibility fixes for Linux");
+        
+        // Disable problematic GPU compositing modes
+        if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
+            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+            log::trace!("WEBKIT_DISABLE_COMPOSITING_MODE=1");
+        }
+        
+        // Disable DMABUF renderer (common cause of GBM errors)
+        if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+            log::trace!("WEBKIT_DISABLE_DMABUF_RENDERER=1");
+        }
+        
+        // Force X11 backend if Wayland causes issues
+        // Check if user explicitly wants Wayland via environment variable
+        let force_x11 = std::env::var("JEAN_FORCE_X11")
+            .unwrap_or_else(|_| "0".to_string()) == "1";
+        if force_x11 && std::env::var_os("GDK_BACKEND").is_none() {
+            std::env::set_var("GDK_BACKEND", "x11");
+            log::trace!("GDK_BACKEND=x11 (forced by JEAN_FORCE_X11)");
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -1074,14 +1166,19 @@ pub fn run() {
                 }
             }
 
-            // Set up native menu system
-            if let Err(e) = create_app_menu(app) {
-                log::error!("Failed to create app menu: {e}");
-                return Err(e);
+            #[cfg(target_os = "macos")]
+            {
+                log::trace!("Creating macOS app menu");
+                if let Err(e) = create_app_menu(app) {
+                    log::error!("Failed to create app menu: {e}");
+                    return Err(e);
+                }
             }
 
-            // Set up menu event handlers
-            app.on_menu_event(move |app, event| {
+            #[cfg(target_os = "macos")]
+            {
+                // Set up menu event handlers
+                app.on_menu_event(move |app, event| {
                 log::trace!("Menu event received: {:?}", event.id());
 
                 match event.id().as_ref() {
@@ -1150,6 +1247,7 @@ pub fn run() {
                     }
                 }
             });
+            }
 
             // Initialize background task manager
             let task_manager = background_tasks::BackgroundTaskManager::new(app.handle().clone());
@@ -1179,6 +1277,7 @@ pub fn run() {
             projects::get_worktree,
             projects::create_worktree,
             projects::create_worktree_from_existing_branch,
+            projects::checkout_pr,
             projects::delete_worktree,
             projects::create_base_session,
             projects::close_base_session,
@@ -1216,6 +1315,7 @@ pub fn run() {
             projects::git_push,
             projects::merge_worktree_to_base,
             projects::get_merge_conflicts,
+            projects::fetch_and_merge_base,
             projects::reorder_projects,
             projects::reorder_worktrees,
             projects::fetch_worktrees_status,
@@ -1224,12 +1324,14 @@ pub fn run() {
             projects::list_claude_commands,
             // GitHub issues commands
             projects::list_github_issues,
+            projects::search_github_issues,
             projects::get_github_issue,
             projects::load_issue_context,
             projects::list_loaded_issue_contexts,
             projects::remove_issue_context,
             // GitHub PR commands
             projects::list_github_prs,
+            projects::search_github_prs,
             projects::get_github_pr,
             projects::load_pr_context,
             projects::list_loaded_pr_contexts,

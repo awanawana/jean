@@ -12,13 +12,14 @@ import { CliUpdateModal } from '@/components/layout/CliUpdateModal'
 import { CliLoginModal } from '@/components/preferences/CliLoginModal'
 import { OpenInModal } from '@/components/open-in/OpenInModal'
 import { MagicModal } from '@/components/magic/MagicModal'
+import { CheckoutPRModal } from '@/components/magic/CheckoutPRModal'
 import { NewWorktreeModal } from '@/components/worktree/NewWorktreeModal'
 import { PathConflictModal } from '@/components/worktree/PathConflictModal'
 import { BranchConflictModal } from '@/components/worktree/BranchConflictModal'
 import { SessionBoardModal } from '@/components/session-board'
 import { GitInitModal } from '@/components/projects/GitInitModal'
 import { QuitConfirmationDialog } from './QuitConfirmationDialog'
-import { Toaster } from 'sonner'
+import { Toaster } from '@/components/ui/sonner'
 import { cn } from '@/lib/utils'
 import { useTheme } from '@/hooks/use-theme'
 import { useWindowMaximized } from '@/hooks/use-window-maximized'
@@ -43,6 +44,7 @@ import {
   useCreateWorktreeKeybinding,
   useProjects,
   useWorktree,
+  useWorktreeEvents,
 } from '@/services/projects'
 import { usePreferences } from '@/services/preferences'
 import { useChatStore } from '@/store/chat-store'
@@ -151,6 +153,10 @@ export function MainWindow() {
   // Listen for git status updates from the background task
   useGitStatusEvents()
 
+  // Listen for background worktree events (creation/deletion) - must be here
+  // (not in sidebar) so events are received even when sidebar is closed
+  useWorktreeEvents()
+
   // Handle CMD+N keybinding to create new worktree
   useCreateWorktreeKeybinding()
 
@@ -247,6 +253,7 @@ export function MainWindow() {
       <CliLoginModal />
       <OpenInModal />
       <MagicModal />
+      <CheckoutPRModal />
       <NewWorktreeModal />
       <PathConflictModal />
       <BranchConflictModal />
@@ -255,14 +262,10 @@ export function MainWindow() {
       <QuitConfirmationDialog />
       <Toaster
         position="bottom-right"
-        theme={
-          theme === 'dark' ? 'dark' : theme === 'light' ? 'light' : 'system'
-        }
-        className="toaster group"
         toastOptions={{
           classNames: {
             toast:
-              'group toast group-[.toaster]:bg-background group-[.toaster]:text-foreground group-[.toaster]:border-border group-[.toaster]:shadow-lg',
+              'group toast group-[.toaster]:bg-sidebar group-[.toaster]:text-foreground group-[.toaster]:border-border group-[.toaster]:shadow-lg',
             description: 'group-[.toast]:text-muted-foreground',
             actionButton:
               'group-[.toast]:bg-primary group-[.toast]:text-primary-foreground',

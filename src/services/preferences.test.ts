@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createElement } from 'react'
 import { usePreferences, useSavePreferences, preferencesQueryKeys } from './preferences'
 import type { AppPreferences } from '@/types/preferences'
-import { FONT_SIZE_DEFAULT, DEFAULT_MAGIC_PROMPTS } from '@/types/preferences'
+import { FONT_SIZE_DEFAULT, DEFAULT_MAGIC_PROMPTS, DEFAULT_MAGIC_PROMPT_MODELS } from '@/types/preferences'
 import { DEFAULT_KEYBINDINGS } from '@/types/keybindings'
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -93,6 +93,7 @@ describe('preferences service', () => {
         session_recap_model: 'haiku',
         parallel_execution_prompt_enabled: false,
         magic_prompts: DEFAULT_MAGIC_PROMPTS,
+        magic_prompt_models: DEFAULT_MAGIC_PROMPT_MODELS,
         file_edit_mode: 'external',
         use_wsl: true,
         ai_language: '',
@@ -170,6 +171,7 @@ describe('preferences service', () => {
         session_recap_model: 'haiku',
         parallel_execution_prompt_enabled: false,
         magic_prompts: DEFAULT_MAGIC_PROMPTS,
+        magic_prompt_models: DEFAULT_MAGIC_PROMPT_MODELS,
         file_edit_mode: 'external',
         use_wsl: true,
         ai_language: '',
@@ -222,6 +224,7 @@ describe('preferences service', () => {
         session_recap_model: 'haiku',
         parallel_execution_prompt_enabled: false,
         magic_prompts: DEFAULT_MAGIC_PROMPTS,
+        magic_prompt_models: DEFAULT_MAGIC_PROMPT_MODELS,
         file_edit_mode: 'external',
         use_wsl: true,
         ai_language: '',
@@ -272,6 +275,7 @@ describe('preferences service', () => {
         session_recap_model: 'haiku',
         parallel_execution_prompt_enabled: false,
         magic_prompts: DEFAULT_MAGIC_PROMPTS,
+        magic_prompt_models: DEFAULT_MAGIC_PROMPT_MODELS,
         file_edit_mode: 'external',
         use_wsl: true,
         ai_language: '',
@@ -322,6 +326,7 @@ describe('preferences service', () => {
         session_recap_model: 'haiku',
         parallel_execution_prompt_enabled: false,
         magic_prompts: DEFAULT_MAGIC_PROMPTS,
+        magic_prompt_models: DEFAULT_MAGIC_PROMPT_MODELS,
         file_edit_mode: 'external',
         use_wsl: true,
         ai_language: '',
@@ -372,6 +377,7 @@ describe('preferences service', () => {
         session_recap_model: 'haiku',
         parallel_execution_prompt_enabled: false,
         magic_prompts: DEFAULT_MAGIC_PROMPTS,
+        magic_prompt_models: DEFAULT_MAGIC_PROMPT_MODELS,
         file_edit_mode: 'external',
         use_wsl: true,
         ai_language: '',

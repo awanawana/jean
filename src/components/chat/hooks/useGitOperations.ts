@@ -20,7 +20,7 @@ import type {
   Project,
 } from '@/types/projects'
 import type { Session } from '@/types/chat'
-import type { AppPreferences } from '@/types/preferences'
+import { DEFAULT_RESOLVE_CONFLICTS_PROMPT, type AppPreferences } from '@/types/preferences'
 
 interface UseGitOperationsParams {
   activeWorktreeId: string | null | undefined
@@ -45,6 +45,8 @@ interface UseGitOperationsReturn {
   handleMerge: () => Promise<void>
   /** Detects existing merge conflicts and opens resolution session */
   handleResolveConflicts: () => Promise<void>
+  /** Fetches base branch and merges to create local conflict state for PR conflict resolution */
+  handleResolvePrConflicts: () => Promise<void>
   /** Executes the actual merge with specified type */
   executeMerge: (mergeType: MergeType) => Promise<void>
   /** Whether merge dialog is open */
@@ -88,6 +90,7 @@ export function useGitOperations({
           worktreePath: activeWorktreePath,
           customPrompt: preferences?.magic_prompts?.commit_message,
           push: false,
+          model: preferences?.magic_prompt_models?.commit_message_model,
         }
       )
 
@@ -102,7 +105,7 @@ export function useGitOperations({
     } finally {
       clearWorktreeLoading(activeWorktreeId)
     }
-  }, [activeWorktreeId, activeWorktreePath, preferences?.magic_prompts?.commit_message])
+  }, [activeWorktreeId, activeWorktreePath, preferences?.magic_prompts?.commit_message, preferences?.magic_prompt_models?.commit_message_model])
 
   // Handle Commit & Push - creates commit with AI-generated message and pushes
   const handleCommitAndPush = useCallback(async () => {
@@ -119,6 +122,7 @@ export function useGitOperations({
           worktreePath: activeWorktreePath,
           customPrompt: preferences?.magic_prompts?.commit_message,
           push: true,
+          model: preferences?.magic_prompt_models?.commit_message_model,
         }
       )
 
@@ -133,7 +137,7 @@ export function useGitOperations({
     } finally {
       clearWorktreeLoading(activeWorktreeId)
     }
-  }, [activeWorktreeId, activeWorktreePath, preferences?.magic_prompts?.commit_message])
+  }, [activeWorktreeId, activeWorktreePath, preferences?.magic_prompts?.commit_message, preferences?.magic_prompt_models?.commit_message_model])
 
   // Handle Open PR - creates PR with AI-generated title and description in background
   const handleOpenPr = useCallback(async () => {
@@ -149,6 +153,7 @@ export function useGitOperations({
         {
           worktreePath: activeWorktreePath,
           customPrompt: preferences?.magic_prompts?.pr_content,
+          model: preferences?.magic_prompt_models?.pr_content_model,
         }
       )
 
@@ -175,7 +180,7 @@ export function useGitOperations({
     } finally {
       clearWorktreeLoading(activeWorktreeId)
     }
-  }, [activeWorktreeId, activeWorktreePath, worktree, queryClient, preferences?.magic_prompts?.pr_content])
+  }, [activeWorktreeId, activeWorktreePath, worktree, queryClient, preferences?.magic_prompts?.pr_content, preferences?.magic_prompt_models?.pr_content_model])
 
   // Handle Review - runs AI code review in background
   const handleReview = useCallback(async () => {
@@ -189,6 +194,7 @@ export function useGitOperations({
       const result = await invoke<ReviewResponse>('run_review_with_ai', {
         worktreePath: activeWorktreePath,
         customPrompt: preferences?.magic_prompts?.code_review,
+        model: preferences?.magic_prompt_models?.code_review_model,
       })
 
       // Store review results in Zustand (also activates review tab)
@@ -214,7 +220,7 @@ export function useGitOperations({
     } finally {
       clearWorktreeLoading(activeWorktreeId)
     }
-  }, [activeWorktreeId, activeWorktreePath, preferences?.magic_prompts?.code_review])
+  }, [activeWorktreeId, activeWorktreePath, preferences?.magic_prompts?.code_review, preferences?.magic_prompt_models?.code_review_model])
 
   // Handle Merge - validates and shows merge options dialog
   const handleMerge = useCallback(async () => {
@@ -295,12 +301,14 @@ export function useGitOperations({
         ? `\n\nHere is the diff showing the conflict details:\n\n\`\`\`diff\n${result.conflict_diff}\n\`\`\``
         : ''
 
+      const resolveInstructions = preferences?.magic_prompts?.resolve_conflicts ?? DEFAULT_RESOLVE_CONFLICTS_PROMPT
+
       const conflictPrompt = `I have merge conflicts that need to be resolved.
 
 Conflicts in these files:
 - ${conflictFiles}${diffSection}
 
-Please help me resolve these conflicts. Analyze the diff above, explain what's conflicting in each file, and guide me through resolving each conflict.`
+${resolveInstructions}`
 
       // Set the input draft for the new session
       setInputDraft(newSession.id, conflictPrompt)
@@ -317,7 +325,78 @@ Please help me resolve these conflicts. Analyze the diff above, explain what's c
     } catch (error) {
       toast.error(`Failed to check conflicts: ${error}`, { id: toastId })
     }
-  }, [activeWorktreeId, worktree, queryClient, inputRef])
+  }, [activeWorktreeId, worktree, preferences, queryClient, inputRef])
+
+  // Handle PR Conflicts - fetches base branch, merges locally to create conflict state
+  const handleResolvePrConflicts = useCallback(async () => {
+    if (!activeWorktreeId || !worktree) return
+
+    const toastId = toast.loading('Fetching base branch and checking for conflicts...')
+
+    try {
+      const result = await invoke<MergeConflictsResponse>(
+        'fetch_and_merge_base',
+        { worktreeId: activeWorktreeId }
+      )
+
+      if (!result.has_conflicts) {
+        toast.success('No conflicts — base branch merged cleanly', { id: toastId })
+        triggerImmediateGitPoll()
+        return
+      }
+
+      toast.warning(
+        `Found conflicts in ${result.conflicts.length} file(s)`,
+        {
+          id: toastId,
+          description: 'Opening conflict resolution session...',
+        }
+      )
+
+      const { setActiveSession, setInputDraft } = useChatStore.getState()
+
+      // Create a NEW session tab for conflict resolution
+      const newSession = await invoke<Session>('create_session', {
+        worktreeId: activeWorktreeId,
+        worktreePath: worktree.path,
+        name: 'PR: resolve conflicts',
+      })
+
+      // Set the new session as active
+      setActiveSession(activeWorktreeId, newSession.id)
+
+      // Build conflict resolution prompt with diff details
+      const conflictFiles = result.conflicts.join('\n- ')
+      const diffSection = result.conflict_diff
+        ? `\n\nHere is the diff showing the conflict details:\n\n\`\`\`diff\n${result.conflict_diff}\n\`\`\``
+        : ''
+
+      const baseBranch = project?.default_branch || 'main'
+      const resolveInstructions = preferences?.magic_prompts?.resolve_conflicts ?? DEFAULT_RESOLVE_CONFLICTS_PROMPT
+
+      const conflictPrompt = `I merged \`origin/${baseBranch}\` into this branch to resolve PR conflicts, but there are merge conflicts.
+
+Conflicts in these files:
+- ${conflictFiles}${diffSection}
+
+${resolveInstructions}`
+
+      // Set the input draft for the new session
+      setInputDraft(newSession.id, conflictPrompt)
+
+      // Invalidate queries to refresh session list in tab bar
+      queryClient.invalidateQueries({
+        queryKey: chatQueryKeys.sessions(activeWorktreeId),
+      })
+
+      // Focus input after a short delay to allow UI to update
+      setTimeout(() => {
+        inputRef.current?.focus()
+      }, 100)
+    } catch (error) {
+      toast.error(`Failed to merge base branch: ${error}`, { id: toastId })
+    }
+  }, [activeWorktreeId, worktree, project, preferences, queryClient, inputRef])
 
   // Execute merge with merge type option
   const executeMerge = useCallback(
@@ -422,6 +501,8 @@ Please help me resolve these conflicts. Analyze the diff above, explain what's c
           // Get base branch name from the project
           const baseBranch = project?.default_branch || 'main'
 
+          const resolveInstructions = preferences?.magic_prompts?.resolve_conflicts ?? DEFAULT_RESOLVE_CONFLICTS_PROMPT
+
           const conflictPrompt = `I tried to merge this branch (\`${featureBranch}\`) into \`${baseBranch}\`, but there are merge conflicts.
 
 To resolve this, please merge \`${baseBranch}\` INTO this branch by running:
@@ -432,7 +513,7 @@ git merge ${baseBranch}
 Then resolve the conflicts in these files:
 - ${conflictFiles}${diffSection}
 
-Please help me resolve these conflicts. Analyze the diff above, explain what's conflicting in each file, and guide me through resolving each conflict.`
+${resolveInstructions}`
 
           // Set the input draft for the new session
           setInputDraft(newSession.id, conflictPrompt)
@@ -453,7 +534,7 @@ Please help me resolve these conflicts. Analyze the diff above, explain what's c
         clearWorktreeLoading(activeWorktreeId)
       }
     },
-    [activeWorktreeId, pendingMergeWorktree, project, queryClient, inputRef]
+    [activeWorktreeId, pendingMergeWorktree, preferences, project, queryClient, inputRef]
   )
 
   return {
@@ -463,6 +544,7 @@ Please help me resolve these conflicts. Analyze the diff above, explain what's c
     handleReview,
     handleMerge,
     handleResolveConflicts,
+    handleResolvePrConflicts,
     executeMerge,
     showMergeDialog,
     setShowMergeDialog,

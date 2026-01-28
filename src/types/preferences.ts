@@ -40,6 +40,8 @@ export interface MagicPrompts {
   code_review: string
   /** Prompt for context summarization */
   context_summary: string
+  /** Prompt for resolving git conflicts (appended to conflict resolution messages) */
+  resolve_conflicts: string
 }
 
 /** Default prompt for investigating GitHub issues */
@@ -191,6 +193,11 @@ Format as clean markdown. Be concise but capture reasoning.
 {conversation}
 </conversation>`
 
+/** Default prompt for resolving git conflicts */
+export const DEFAULT_RESOLVE_CONFLICTS_PROMPT = `Please help me resolve these conflicts. Analyze the diff above, explain what's conflicting in each file, and guide me through resolving each conflict.
+
+After resolving each file's conflicts, stage it with \`git add\`. Then run the appropriate continue command (\`git rebase --continue\`, \`git merge --continue\`, or \`git cherry-pick --continue\`). If more conflicts appear, resolve those too. Keep going until the operation is fully complete and the branch is ready to push.`
+
 /** Default values for all magic prompts */
 export const DEFAULT_MAGIC_PROMPTS: MagicPrompts = {
   investigate_issue: DEFAULT_INVESTIGATE_ISSUE_PROMPT,
@@ -199,6 +206,29 @@ export const DEFAULT_MAGIC_PROMPTS: MagicPrompts = {
   commit_message: DEFAULT_COMMIT_MESSAGE_PROMPT,
   code_review: DEFAULT_CODE_REVIEW_PROMPT,
   context_summary: DEFAULT_CONTEXT_SUMMARY_PROMPT,
+  resolve_conflicts: DEFAULT_RESOLVE_CONFLICTS_PROMPT,
+}
+
+/**
+ * Per-prompt model overrides. Field names use snake_case to match Rust struct exactly.
+ */
+export interface MagicPromptModels {
+  investigate_model: ClaudeModel
+  pr_content_model: ClaudeModel
+  commit_message_model: ClaudeModel
+  code_review_model: ClaudeModel
+  context_summary_model: ClaudeModel
+  resolve_conflicts_model: ClaudeModel
+}
+
+/** Default models for each magic prompt */
+export const DEFAULT_MAGIC_PROMPT_MODELS: MagicPromptModels = {
+  investigate_model: 'opus',
+  pr_content_model: 'haiku',
+  commit_message_model: 'haiku',
+  code_review_model: 'haiku',
+  context_summary_model: 'opus',
+  resolve_conflicts_model: 'opus',
 }
 
 // Types that match the Rust AppPreferences struct
@@ -230,6 +260,7 @@ export interface AppPreferences {
   session_recap_model: ClaudeModel // Model for generating session recaps
   parallel_execution_prompt_enabled: boolean // Add system prompt to encourage parallel sub-agent execution
   magic_prompts: MagicPrompts // Customizable prompts for AI-powered features
+  magic_prompt_models: MagicPromptModels // Per-prompt model overrides
   file_edit_mode: FileEditMode // How to edit files: inline (CodeMirror) or external (VS Code, etc.)
   use_wsl: boolean // Windows only: use WSL for git/CLI operations (true) or native Windows (false)
   ai_language: string // Preferred language for AI responses (empty = default)
@@ -425,6 +456,7 @@ export const defaultPreferences: AppPreferences = {
   session_recap_model: 'haiku', // Default: haiku for fast recaps
   parallel_execution_prompt_enabled: false, // Default: disabled (experimental)
   magic_prompts: DEFAULT_MAGIC_PROMPTS,
+  magic_prompt_models: DEFAULT_MAGIC_PROMPT_MODELS,
   file_edit_mode: 'external',
   use_wsl: true, // Default to WSL mode for backward compatibility
   ai_language: '', // Default: empty (Claude's default behavior)

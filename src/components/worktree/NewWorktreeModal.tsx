@@ -29,10 +29,14 @@ import { useChatStore } from '@/store/chat-store'
 import {
   useGitHubIssues,
   useGitHubPRs,
+  useSearchGitHubIssues,
+  useSearchGitHubPRs,
   filterIssues,
   filterPRs,
+  mergeWithSearchResults,
   githubQueryKeys,
 } from '@/services/github'
+import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import {
   useProjects,
   useWorktrees,
@@ -108,16 +112,42 @@ export function NewWorktreeModal() {
     refetch: refetchPRs,
   } = useGitHubPRs(selectedProject?.path ?? null, prState)
 
-  // Filter issues locally
-  const filteredIssues = useMemo(
-    () => filterIssues(issues ?? [], searchQuery),
-    [issues, searchQuery]
+  // Debounced search query for GitHub API search
+  const debouncedSearchQuery = useDebouncedValue(searchQuery, 300)
+
+  // GitHub search queries (triggered when local filter may miss results)
+  const {
+    data: searchedIssues,
+    isFetching: isSearchingIssues,
+  } = useSearchGitHubIssues(
+    selectedProject?.path ?? null,
+    debouncedSearchQuery,
   )
 
-  // Filter PRs locally
+  const {
+    data: searchedPRs,
+    isFetching: isSearchingPRs,
+  } = useSearchGitHubPRs(
+    selectedProject?.path ?? null,
+    debouncedSearchQuery,
+  )
+
+  // Filter issues locally, then merge with remote search results
+  const filteredIssues = useMemo(
+    () => mergeWithSearchResults(
+      filterIssues(issues ?? [], searchQuery),
+      searchedIssues,
+    ),
+    [issues, searchQuery, searchedIssues]
+  )
+
+  // Filter PRs locally, then merge with remote search results
   const filteredPRs = useMemo(
-    () => filterPRs(prs ?? [], searchQuery),
-    [prs, searchQuery]
+    () => mergeWithSearchResults(
+      filterPRs(prs ?? [], searchQuery),
+      searchedPRs,
+    ),
+    [prs, searchQuery, searchedPRs]
   )
 
   // Mutations
@@ -448,23 +478,20 @@ export function NewWorktreeModal() {
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       const key = e.key.toLowerCase()
-      const target = e.target as HTMLElement
-      const isInputFocused =
-        target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
 
-      // Tab shortcuts (only when not typing in an input)
-      if (!isInputFocused) {
-        if (key === 'q' && !e.metaKey && !e.ctrlKey) {
+      // Tab shortcuts (Cmd+key, works even when input is focused)
+      if (e.metaKey || e.ctrlKey) {
+        if (key === 'q') {
           e.preventDefault()
           setActiveTab('quick')
           return
         }
-        if (key === 'i' && !e.metaKey && !e.ctrlKey) {
+        if (key === 'i') {
           e.preventDefault()
           setActiveTab('issues')
           return
         }
-        if (key === 'p' && !e.metaKey && !e.ctrlKey) {
+        if (key === 'p') {
           e.preventDefault()
           setActiveTab('prs')
           return
@@ -575,7 +602,7 @@ export function NewWorktreeModal() {
             >
               {tab.label}
               <kbd className="ml-2 text-xs text-muted-foreground bg-muted px-1 py-0.5 rounded">
-                {tab.key}
+                ⌘+{tab.key}
               </kbd>
             </button>
           ))}
@@ -601,6 +628,7 @@ export function NewWorktreeModal() {
               issues={filteredIssues}
               isLoading={isLoadingIssues}
               isRefetching={isRefetchingIssues}
+              isSearching={isSearchingIssues}
               error={issuesError}
               onRefresh={() => refetchIssues()}
               selectedIndex={selectedItemIndex}
@@ -621,6 +649,7 @@ export function NewWorktreeModal() {
               prs={filteredPRs}
               isLoading={isLoadingPRs}
               isRefetching={isRefetchingPRs}
+              isSearching={isSearchingPRs}
               error={prsError}
               onRefresh={() => refetchPRs()}
               selectedIndex={selectedItemIndex}
@@ -651,54 +680,52 @@ function QuickActionsTab({
   isCreating,
 }: QuickActionsTabProps) {
   return (
-    <div className="p-4 space-y-2">
-      {/* Base Session button */}
-      <button
-        onClick={onBaseSession}
-        disabled={isCreating}
-        className={cn(
-          'w-full flex items-center justify-between px-4 py-3 rounded-md text-sm transition-colors',
-          'hover:bg-accent focus:outline-none focus:ring-2 focus:ring-ring',
-          'border border-border'
-        )}
-      >
-        <div className="flex items-center gap-3">
-          <GitBranch className="h-4 w-4 text-muted-foreground" />
-          <div className="flex flex-col items-start">
-            <span>{hasBaseSession ? 'Switch to Base Session' : 'New Base Session'}</span>
-            <span className="text-xs text-muted-foreground">Work directly on the project folder</span>
-          </div>
-        </div>
-        <kbd className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
-          B
-        </kbd>
-      </button>
-
-      {/* New Worktree button */}
-      <button
-        onClick={onCreateWorktree}
-        disabled={isCreating}
-        className={cn(
-          'w-full flex items-center justify-between px-4 py-3 rounded-md text-sm transition-colors',
-          'hover:bg-accent focus:outline-none focus:ring-2 focus:ring-ring',
-          'border border-border'
-        )}
-      >
-        <div className="flex items-center gap-3">
-          {isCreating ? (
-            <Loader2 className="h-4 w-4 text-muted-foreground animate-spin" />
-          ) : (
-            <Plus className="h-4 w-4 text-muted-foreground" />
+    <div className="flex items-center justify-center flex-1 p-10">
+      <div className="grid grid-cols-2 gap-6 w-full max-w-xl">
+        {/* Base Session button */}
+        <button
+          onClick={onBaseSession}
+          disabled={isCreating}
+          className={cn(
+            'relative flex flex-col items-center justify-center gap-4 aspect-square p-8 rounded-xl text-sm transition-colors',
+            'hover:bg-accent focus:outline-none focus:ring-2 focus:ring-ring',
+            'border border-border'
           )}
-          <div className="flex flex-col items-start">
-            <span>New Worktree</span>
-            <span className="text-xs text-muted-foreground">Create an isolated branch for your task</span>
+        >
+          <GitBranch className="h-10 w-10 text-muted-foreground" />
+          <div className="flex flex-col items-center gap-1.5">
+            <span className="font-medium text-base">{hasBaseSession ? 'Switch to Base Session' : 'New Base Session'}</span>
+            <span className="text-xs text-muted-foreground text-center">Work directly on the project folder</span>
           </div>
-        </div>
-        <kbd className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
-          N
-        </kbd>
-      </button>
+          <kbd className="absolute top-3 right-3 text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+            B
+          </kbd>
+        </button>
+
+        {/* New Worktree button */}
+        <button
+          onClick={onCreateWorktree}
+          disabled={isCreating}
+          className={cn(
+            'relative flex flex-col items-center justify-center gap-4 aspect-square p-8 rounded-xl text-sm transition-colors',
+            'hover:bg-accent focus:outline-none focus:ring-2 focus:ring-ring',
+            'border border-border'
+          )}
+        >
+          {isCreating ? (
+            <Loader2 className="h-10 w-10 text-muted-foreground animate-spin" />
+          ) : (
+            <Plus className="h-10 w-10 text-muted-foreground" />
+          )}
+          <div className="flex flex-col items-center gap-1.5">
+            <span className="font-medium text-base">New Worktree</span>
+            <span className="text-xs text-muted-foreground text-center">Create an isolated branch for your task</span>
+          </div>
+          <kbd className="absolute top-3 right-3 text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+            N
+          </kbd>
+        </button>
+      </div>
     </div>
   )
 }
@@ -711,6 +738,7 @@ interface GitHubIssuesTabProps {
   issues: GitHubIssue[]
   isLoading: boolean
   isRefetching: boolean
+  isSearching: boolean
   error: Error | null
   onRefresh: () => void
   selectedIndex: number
@@ -729,6 +757,7 @@ function GitHubIssuesTab({
   issues,
   isLoading,
   isRefetching,
+  isSearching,
   error,
   onRefresh,
   selectedIndex,
@@ -808,10 +837,19 @@ function GitHubIssuesTab({
           </div>
         )}
 
-        {!isLoading && !error && issues.length === 0 && (
+        {!isLoading && !error && issues.length === 0 && !isSearching && (
           <div className="flex items-center justify-center py-8">
             <span className="text-sm text-muted-foreground">
               {searchQuery ? 'No issues match your search' : 'No open issues found'}
+            </span>
+          </div>
+        )}
+
+        {!isLoading && !error && issues.length === 0 && isSearching && (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            <span className="ml-2 text-sm text-muted-foreground">
+              Searching GitHub...
             </span>
           </div>
         )}
@@ -830,6 +868,14 @@ function GitHubIssuesTab({
                 onInvestigate={() => onInvestigateIssue(issue)}
               />
             ))}
+            {isSearching && (
+              <div className="flex items-center justify-center py-2">
+                <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                <span className="ml-1.5 text-xs text-muted-foreground">
+                  Searching GitHub for more results...
+                </span>
+              </div>
+            )}
           </div>
         )}
       </ScrollArea>
@@ -845,6 +891,7 @@ interface GitHubPRsTabProps {
   prs: GitHubPullRequest[]
   isLoading: boolean
   isRefetching: boolean
+  isSearching: boolean
   error: Error | null
   onRefresh: () => void
   selectedIndex: number
@@ -863,6 +910,7 @@ function GitHubPRsTab({
   prs,
   isLoading,
   isRefetching,
+  isSearching,
   error,
   onRefresh,
   selectedIndex,
@@ -942,10 +990,19 @@ function GitHubPRsTab({
           </div>
         )}
 
-        {!isLoading && !error && prs.length === 0 && (
+        {!isLoading && !error && prs.length === 0 && !isSearching && (
           <div className="flex items-center justify-center py-8">
             <span className="text-sm text-muted-foreground">
               {searchQuery ? 'No PRs match your search' : 'No open pull requests found'}
+            </span>
+          </div>
+        )}
+
+        {!isLoading && !error && prs.length === 0 && isSearching && (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            <span className="ml-2 text-sm text-muted-foreground">
+              Searching GitHub...
             </span>
           </div>
         )}
@@ -964,6 +1021,14 @@ function GitHubPRsTab({
                 onInvestigate={() => onInvestigatePR(pr)}
               />
             ))}
+            {isSearching && (
+              <div className="flex items-center justify-center py-2">
+                <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                <span className="ml-1.5 text-xs text-muted-foreground">
+                  Searching GitHub for more results...
+                </span>
+              </div>
+            )}
           </div>
         )}
       </ScrollArea>

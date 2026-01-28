@@ -606,6 +606,7 @@ pub async fn restore_session_with_base(
         cached_base_branch_ahead_count: None,
         cached_base_branch_behind_count: None,
         cached_worktree_ahead_count: None,
+        cached_unpushed_count: None,
         order: 0,
         archived_at: None,
     };
@@ -2315,6 +2316,7 @@ fn generate_fallback_slug(project_name: &str, session_name: &str) -> String {
 fn execute_summarization_claude(
     app: &AppHandle,
     prompt: &str,
+    model: Option<&str>,
 ) -> Result<ContextSummaryResponse, String> {
     let cli_path = get_cli_binary_path(app)?;
 
@@ -2324,6 +2326,7 @@ fn execute_summarization_claude(
 
     log::trace!("Executing one-shot Claude summarization with JSON schema");
 
+    let model_str = model.unwrap_or("opus");
     let mut cmd = Command::new(&cli_path);
     cmd.args([
         "--print",
@@ -2333,7 +2336,7 @@ fn execute_summarization_claude(
         "stream-json",
         "--verbose",
         "--model",
-        "opus", // High-quality model for summarization
+        model_str,
         "--no-session-persistence",
         "--max-turns",
         "1",
@@ -2421,6 +2424,7 @@ pub async fn generate_context_from_session(
     source_session_id: String,
     project_name: String,
     custom_prompt: Option<String>,
+    model: Option<String>,
 ) -> Result<SaveContextResponse, String> {
     log::trace!(
         "Generating context from session {} for project {}",
@@ -2459,7 +2463,7 @@ pub async fn generate_context_from_session(
 
     // 4. Call Claude CLI with JSON schema (non-streaming)
     // If JSON parsing fails, use fallback slug from project + session name
-    let (summary, slug) = match execute_summarization_claude(&app, &prompt) {
+    let (summary, slug) = match execute_summarization_claude(&app, &prompt, model.as_deref()) {
         Ok(response) => {
             // Validate slug is not empty
             let slug = if response.slug.trim().is_empty() {

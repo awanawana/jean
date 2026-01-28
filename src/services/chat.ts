@@ -1092,9 +1092,9 @@ export function useSendMessage() {
         model,
         executionMode,
         thinkingLevel,
-        disable_thinking_for_mode: disableThinkingForMode,
-        parallel_execution_prompt_enabled: parallelExecutionPromptEnabled,
-        ai_language: aiLanguage,
+        disableThinkingForMode,
+        parallelExecutionPromptEnabled,
+        aiLanguage,
         allowedTools,
         use_wsl: useWsl,
       })
