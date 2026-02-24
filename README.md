@@ -92,3 +92,10 @@ Learn more about our approach: [Philosophy](https://coollabs.io/philosophy/)
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=coollabsio/jean&type=Date)](https://star-history.com/#coollabsio/jean&Date)
+
+
+## Usage
+
+```python
+# Usage examples
+```
